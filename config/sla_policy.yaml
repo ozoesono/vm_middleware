@@ -1,0 +1,7 @@
+sla:
+  critical: 10    # days
+  high: 30
+  medium: 45
+  low: 90
+  use_business_days: false
+  approaching_warning_days: 5

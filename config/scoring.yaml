@@ -1,0 +1,16 @@
+scoring:
+  active_model: "custom"  # "custom" | "lumin_ces"
+
+  custom:
+    vpr_weight: 0.50
+    acs_weight: 0.50
+    thresholds:
+      critical: 0.75
+      high: 0.50
+      medium: 0.30
+
+  lumin:
+    ces_thresholds:
+      critical: 800
+      high: 600
+      medium: 400

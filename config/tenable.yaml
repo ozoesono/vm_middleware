@@ -1,0 +1,34 @@
+tenable:
+  base_url: "https://cloud.tenable.com"
+
+  # --- Retrieval mode ---
+  # "search" = synchronous paginated via POST /api/v1/t1/inventory/findings/search
+  #            Best for datasets under ~50k findings. Immediate results.
+  # "export" = async bulk export via POST /api/v1/t1/inventory/export/findings
+  #            Best for large datasets. Queues job, polls, downloads chunks.
+  retrieval_mode: "search"
+
+  # API endpoints (Tenable One Inventory — Exposure Management)
+  findings_endpoint: "/api/v1/t1/inventory/findings/search"
+  export_endpoint: "/api/v1/t1/inventory/export/findings"
+
+  # Search mode settings
+  page_size: 10000
+
+  # Properties to retrieve from the Inventory API
+  # These are available across ALL Tenable modules (VM, Cloud Security, WAS, containers)
+  extra_properties: "asset_name,vpr_score,cve,solution,acr,aes,epss_score,exploit_maturity,cvssv3_base_score,source,plugin_id,first_seen,last_seen,tags"
+
+  # Filter findings by severity (null = all severities)
+  severity_filter: null
+
+  # Days before a missing finding is marked STALE (not auto-closed)
+  stale_threshold_days: 7
+
+  # HTTP settings
+  request_timeout_seconds: 120
+  max_retries: 3
+
+  # Export mode settings
+  export_poll_interval: 10     # seconds between status polls
+  export_max_wait: 600         # max seconds to wait for export to complete

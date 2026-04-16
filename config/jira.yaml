@@ -1,0 +1,19 @@
+jira:
+  base_url: "https://org.atlassian.net"
+  default_project: "VULN"
+  issue_type: "Task"
+  labels: ["vm-middleware"]
+
+  priority_mapping:
+    CRITICAL: "Highest"
+    HIGH: "High"
+    MEDIUM: "Medium"
+    LOW: "Low"
+
+  portfolio_project_mapping: {}
+  # Example:
+  #   payments: "PAY"
+  #   platform: "PLAT"
+
+  close_transition: "Done"
+  reopen_transition: "To Do"

@@ -1,0 +1,8 @@
+asset_identifier,identifier_type,portfolio,service,environment,data_sensitivity,asset_criticality,service_owner,service_owner_team
+prod-api-server-01,asset_name,payments,payment-api,prod,CONFIDENTIAL,CRITICAL,john.smith@org.com,team-payments
+prod-web-server-01,asset_name,platform,web-gateway,prod,INTERNAL,HIGH,jane.doe@org.com,team-platform
+customer-portal.example.com,asset_name,customer,customer-portal,prod,CONFIDENTIAL,HIGH,bob.wilson@org.com,team-customer
+data-export-bucket,asset_name,data-platform,data-export,prod,RESTRICTED,CRITICAL,alice.chen@org.com,team-data
+ecr:payments/checkout-service:latest,asset_name,payments,checkout-service,prod,CONFIDENTIAL,CRITICAL,john.smith@org.com,team-payments
+prod-internal-lb,asset_name,platform,networking,prod,INTERNAL,MEDIUM,jane.doe@org.com,team-platform
+staging-app-server-01,asset_name,platform,app-service,staging,INTERNAL,LOW,jane.doe@org.com,team-platform

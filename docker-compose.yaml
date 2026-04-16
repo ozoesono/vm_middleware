@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vm-middleware-db
+    environment:
+      POSTGRES_DB: vm_middleware
+      POSTGRES_USER: vm_user
+      POSTGRES_PASSWORD: vm_local_pass
+    ports:
+      - "5435:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vm_user -d vm_middleware"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

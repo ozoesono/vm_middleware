@@ -1,0 +1,23 @@
+rollout:
+  phase: "pilot"  # "pilot" | "critical_high" | "medium" | "full"
+
+  phases:
+    pilot:
+      severity_filter: ["CRITICAL", "HIGH"]
+      team_filter: ["team-platform", "team-api"]
+      max_tickets_per_run: 50
+
+    critical_high:
+      severity_filter: ["CRITICAL", "HIGH"]
+      team_filter: []
+      max_tickets_per_run: 100
+
+    medium:
+      severity_filter: ["CRITICAL", "HIGH", "MEDIUM"]
+      team_filter: []
+      max_tickets_per_run: 200
+
+    full:
+      severity_filter: ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+      team_filter: []
+      max_tickets_per_run: 500
