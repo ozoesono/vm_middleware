@@ -1,6 +1,6 @@
 .PHONY: install test db-up db-down db-migrate db-rollback run-pipeline lint clean
 
-PYTHON ?= python3.12
+PYTHON ?= python3
 VENV = .venv
 PIP = $(VENV)/bin/pip
 PYTEST = $(VENV)/bin/pytest
