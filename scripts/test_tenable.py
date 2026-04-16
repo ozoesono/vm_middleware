@@ -54,6 +54,7 @@ client = httpx.Client(
 response = client.post(
     ENDPOINT,
     params={"offset": 0, "limit": 50, "extra_properties": EXTRA_PROPS, "sort": "severity:desc"},
+    json={},
 )
 
 if response.status_code != 200:
