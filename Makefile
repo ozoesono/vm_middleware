@@ -1,7 +1,8 @@
 .PHONY: install test db-up db-down db-migrate db-rollback run-pipeline lint clean
 
 PYTHON ?= python3
-VENV = .venv
+ROOT_DIR := $(shell pwd)
+VENV = $(ROOT_DIR)/.venv
 PIP = $(VENV)/bin/pip
 PYTEST = $(VENV)/bin/pytest
 ALEMBIC = $(VENV)/bin/alembic
