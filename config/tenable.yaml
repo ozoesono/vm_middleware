@@ -16,8 +16,8 @@ tenable:
   page_size: 10000
 
   # Properties to retrieve from the Inventory API
-  # These are available across ALL Tenable modules (VM, Cloud Security, WAS, containers)
-  extra_properties: "asset_name,vpr_score,cve,solution,acr,aes,epss_score,exploit_maturity,cvssv3_base_score,source,plugin_id,first_seen,last_seen,tags"
+  # These are the actual field names from GET /api/v1/t1/inventory/findings/properties
+  extra_properties: "finding_vpr_score,finding_cvss3_base_score,finding_cves,finding_solution,finding_detection_id,asset_name,asset_class,sensor_type,first_observed_at,last_observed_at,last_updated,tag_names,tag_ids,ipv4_addresses,product"
 
   # Filter findings by severity (null = all severities)
   severity_filter: null

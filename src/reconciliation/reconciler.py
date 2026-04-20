@@ -86,9 +86,10 @@ def reconcile(
         staged = staged_lookup.get(finding.tenable_finding_id)
         if staged is not None:
             staged_processed.add(finding.tenable_finding_id)
-            if staged.tenable_state in ("Active", "Resurfaced", "New"):
+            state_upper = (staged.tenable_state or "").upper()
+            if state_upper in ("ACTIVE", "RESURFACED", "NEW"):
                 _process_recurrence(finding, staged, config, run_id, session, stats)
-            # else: still Fixed — no action needed, just mark as processed
+            # else: still FIXED — no action needed, just mark as processed
 
     # Step 3: Create new findings for staged items not in DB
     for tenable_id, staged in staged_lookup.items():
@@ -188,12 +189,12 @@ def _process_existing_with_staged(
     stats: ReconciliationStats,
 ) -> None:
     """Process a finding that exists in both DB and current staging."""
-    tenable_state = staged.tenable_state or "Active"
+    tenable_state = (staged.tenable_state or "ACTIVE").upper()
 
-    if tenable_state == "Fixed":
+    if tenable_state == "FIXED":
         # REMEDIATED: Tenable confirms it's fixed
         finding.state = "REMEDIATED"
-        finding.tenable_state = "Fixed"
+        finding.tenable_state = tenable_state
         finding.remediated_at = _utcnow()
         finding.last_seen = staged.last_seen or finding.last_seen
         finding.last_run_id = run_id

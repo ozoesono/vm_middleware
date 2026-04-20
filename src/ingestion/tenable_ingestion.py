@@ -1,4 +1,30 @@
-"""Tenable ingestion orchestrator — fetches, normalises, and stages findings."""
+"""Tenable ingestion orchestrator — fetches, normalises, and stages findings.
+
+Field mapping from Tenable One Inventory API to our data model:
+
+    Tenable API field         →  Our model field
+    ─────────────────────────────────────────────
+    id                        →  tenable_finding_id
+    name                      →  title (this is the CVE ID)
+    asset_id                  →  tenable_asset_id
+    state                     →  tenable_state (ACTIVE/FIXED/RESURFACED)
+    severity                  →  severity (CRITICAL/HIGH/MEDIUM/LOW/INFO)
+    extra_properties:
+      finding_vpr_score       →  vpr_score
+      finding_cvss3_base_score → cvssv3_score
+      finding_cves            →  cve_id (list → first item)
+      finding_solution        →  solution
+      finding_severity        →  (use top-level severity instead)
+      finding_detection_id    →  plugin_id
+      asset_name              →  asset_name
+      asset_class             →  asset_type
+      sensor_type             →  source
+      first_observed_at       →  first_seen
+      last_observed_at        →  last_seen
+      tag_names               →  tenable_tags
+      tag_ids                 →  (stored in tenable_tags)
+      ipv4_addresses          →  asset_ip (list → first item)
+"""
 
 from __future__ import annotations
 
@@ -13,6 +39,25 @@ from src.common.models import FindingStaging
 
 logger = get_logger("tenable_ingestion")
 
+# The extra_properties we request from the Tenable Inventory API
+EXTRA_PROPERTIES = ",".join([
+    "finding_vpr_score",
+    "finding_cvss3_base_score",
+    "finding_cves",
+    "finding_solution",
+    "finding_detection_id",
+    "asset_name",
+    "asset_class",
+    "sensor_type",
+    "first_observed_at",
+    "last_observed_at",
+    "last_updated",
+    "tag_names",
+    "tag_ids",
+    "ipv4_addresses",
+    "product",
+])
+
 
 def _parse_datetime(value: Any) -> datetime | None:
     """Parse a datetime from various Tenable formats."""
@@ -20,9 +65,20 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value
+    if isinstance(value, (int, float)):
+        # Unix timestamp
+        try:
+            return datetime.utcfromtimestamp(value)
+        except (ValueError, OSError):
+            return None
     if isinstance(value, str):
-        # Try common formats
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
             try:
                 return datetime.strptime(value, fmt)
             except ValueError:
@@ -53,40 +109,75 @@ def _safe_int(value: Any) -> int | None:
 def _get_extra(finding: dict, key: str) -> Any:
     """Get a value from finding's extra_properties or top-level."""
     extra = finding.get("extra_properties", {})
-    if isinstance(extra, dict):
-        if key in extra:
-            return extra[key]
-    # Also check top-level
+    if isinstance(extra, dict) and key in extra:
+        return extra[key]
     return finding.get(key)
 
 
+def _first_item(value: Any) -> str | None:
+    """Extract first item from a list, or return the value as-is."""
+    if isinstance(value, list):
+        return str(value[0]) if value else None
+    if value is not None:
+        return str(value)
+    return None
+
+
 def normalise_finding(finding: dict[str, Any], run_id: uuid.UUID) -> FindingStaging:
-    """Normalise a raw Tenable API finding into a FindingStaging record."""
+    """Normalise a raw Tenable Inventory API finding into a FindingStaging record.
+
+    Maps from actual Tenable One Inventory field names to our canonical model.
+    """
+    extra = finding.get("extra_properties", {}) or {}
+
+    # CVE: finding_cves is a list like ["CVE-2023-2640"], take the first
+    cve_list = extra.get("finding_cves", [])
+    cve_id = _first_item(cve_list)
+
+    # IP: ipv4_addresses is a list, take the first
+    ip_list = extra.get("ipv4_addresses", [])
+    asset_ip = _first_item(ip_list)
+
+    # Tags: combine tag_names and tag_ids into a dict for enrichment processing
+    tag_names = extra.get("tag_names", [])
+    tag_ids = extra.get("tag_ids", [])
+    tenable_tags = None
+    if tag_names or tag_ids:
+        tenable_tags = {"tag_names": tag_names, "tag_ids": tag_ids}
+
     return FindingStaging(
         id=uuid.uuid4(),
         run_id=run_id,
         tenable_finding_id=str(finding.get("id", "")),
-        tenable_asset_id=str(_get_extra(finding, "asset_id") or finding.get("asset_id", "")),
-        title=str(finding.get("name", _get_extra(finding, "finding_name") or "Unknown")),
-        cve_id=_get_extra(finding, "cve"),
+        tenable_asset_id=str(finding.get("asset_id", "")),
+
+        # Finding details
+        title=str(finding.get("name", "Unknown")),
+        cve_id=cve_id,
         severity=str(finding.get("severity", "Info")),
-        vpr_score=_safe_float(_get_extra(finding, "vpr_score")),
-        acr=_safe_int(_get_extra(finding, "acr")),
-        aes=_safe_int(_get_extra(finding, "aes")),
-        epss_score=_safe_float(_get_extra(finding, "epss_score")),
-        exploit_maturity=_get_extra(finding, "exploit_maturity"),
-        cvssv3_score=_safe_float(_get_extra(finding, "cvssv3_base_score")),
-        source=_get_extra(finding, "source"),
-        plugin_id=str(_get_extra(finding, "plugin_id") or ""),
-        solution=_get_extra(finding, "solution"),
-        tenable_state=str(finding.get("state", "Active")),
-        asset_name=_get_extra(finding, "asset_name"),
-        asset_type=_get_extra(finding, "asset_type"),
-        asset_ip=_get_extra(finding, "asset_ip"),
-        asset_hostname=_get_extra(finding, "asset_hostname"),
-        tenable_tags=_get_extra(finding, "tags"),
-        first_seen=_parse_datetime(_get_extra(finding, "first_seen")),
-        last_seen=_parse_datetime(_get_extra(finding, "last_seen")),
+        vpr_score=_safe_float(extra.get("finding_vpr_score")),
+        acr=None,   # Not available in Inventory API
+        aes=None,   # Not available in Inventory API
+        epss_score=None,  # Not available in Inventory API
+        exploit_maturity=None,  # Not available in Inventory API
+        cvssv3_score=_safe_float(extra.get("finding_cvss3_base_score")),
+        source=extra.get("sensor_type"),
+        plugin_id=str(extra.get("finding_detection_id", "") or ""),
+        solution=extra.get("finding_solution"),
+
+        # State
+        tenable_state=str(finding.get("state", "ACTIVE")),
+
+        # Asset details
+        asset_name=extra.get("asset_name"),
+        asset_type=extra.get("asset_class"),
+        asset_ip=asset_ip,
+        asset_hostname=None,  # Not directly available
+
+        # Tags and timestamps
+        tenable_tags=tenable_tags,
+        first_seen=_parse_datetime(extra.get("first_observed_at")),
+        last_seen=_parse_datetime(extra.get("last_observed_at")),
     )
 
 
@@ -118,7 +209,11 @@ def ingest_findings(
                 session.flush()
                 batch = []
         except Exception as e:
-            logger.warning("finding_normalisation_error", error=str(e), finding_id=raw_finding.get("id"))
+            logger.warning(
+                "finding_normalisation_error",
+                error=str(e),
+                finding_id=raw_finding.get("id"),
+            )
             continue
 
     # Flush remaining batch

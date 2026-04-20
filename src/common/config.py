@@ -87,8 +87,10 @@ class TenableConfig(BaseModel):
     retrieval_mode: str = "search"  # "search" | "export"
     page_size: int = 10000
     extra_properties: str = (
-        "asset_name,vpr_score,cve,solution,acr,aes,epss_score,"
-        "exploit_maturity,cvssv3_base_score,source,plugin_id,first_seen,last_seen,tags"
+        "finding_vpr_score,finding_cvss3_base_score,finding_cves,finding_solution,"
+        "finding_detection_id,asset_name,asset_class,sensor_type,"
+        "first_observed_at,last_observed_at,last_updated,tag_names,tag_ids,"
+        "ipv4_addresses,product"
     )
     severity_filter: list[str] | None = None
     stale_threshold_days: int = 7

@@ -83,7 +83,7 @@ class TestReconciliation:
     def test_still_open(self, db_session, config, run_id):
         """A finding in both DB and staging with Active state = STILL OPEN."""
         self._make_finding(db_session, tenable_finding_id="f-open")
-        self._make_staged(db_session, run_id, tenable_finding_id="f-open", tenable_state="Active")
+        self._make_staged(db_session, run_id, tenable_finding_id="f-open", tenable_state="ACTIVE")
 
         stats = reconcile(db_session, config, run_id)
 
@@ -97,7 +97,7 @@ class TestReconciliation:
     def test_remediated(self, db_session, config, run_id):
         """A finding in DB as OPEN + staged with Fixed state = REMEDIATED."""
         self._make_finding(db_session, tenable_finding_id="f-fixed")
-        self._make_staged(db_session, run_id, tenable_finding_id="f-fixed", tenable_state="Fixed")
+        self._make_staged(db_session, run_id, tenable_finding_id="f-fixed", tenable_state="FIXED")
 
         stats = reconcile(db_session, config, run_id)
 
@@ -120,7 +120,7 @@ class TestReconciliation:
             remediated_at=datetime(2026, 3, 20),
         )
         self._make_staged(
-            db_session, run_id, tenable_finding_id="f-recur", tenable_state="Resurfaced"
+            db_session, run_id, tenable_finding_id="f-recur", tenable_state="RESURFACED"
         )
 
         stats = reconcile(db_session, config, run_id)
@@ -175,8 +175,8 @@ class TestReconciliation:
         self._make_finding(db_session, tenable_finding_id="f-gone", last_seen=old)
 
         # Staged: update + fix + new
-        self._make_staged(db_session, run_id, tenable_finding_id="f-update", tenable_state="Active")
-        self._make_staged(db_session, run_id, tenable_finding_id="f-fix", tenable_state="Fixed")
+        self._make_staged(db_session, run_id, tenable_finding_id="f-update", tenable_state="ACTIVE")
+        self._make_staged(db_session, run_id, tenable_finding_id="f-fix", tenable_state="FIXED")
         self._make_staged(db_session, run_id, tenable_finding_id="f-brand-new")
 
         stats = reconcile(db_session, config, run_id)
