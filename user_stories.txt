@@ -1,0 +1,38 @@
+VM MIDDLEWARE — USER STORIES
+================================================================
+
+PHASE 0 — FOUNDATION (Done)
+----------------------------------------------------------------
+
+  1. Ingest findings from Tenable Inventory API
+  2. Normalise findings into canonical data model
+  3. Implement configurable risk scoring engine (VPR + ACS)
+  4. Calculate SLA due dates and track breach status
+  5. Reconcile finding state changes across pipeline runs
+  6. Load asset enrichment data from CSV
+  7. Set up local development environment with Docker PostgreSQL
+
+
+PHASE 1 — PRODUCTION BASELINE
+----------------------------------------------------------------
+
+  1. Deploy pipeline on configurable schedule (AWS Lambda + EventBridge)
+  2. Support async bulk export for large finding sets (4.4M+ findings)
+  3. Filter findings by Tenable tags (portfolio-based querying)
+  4. Generate baseline vulnerability report (first full scan)
+  5. Enrich findings from Tenable tags (Portfolio, Service, Environment)
+  6. Validate scoring thresholds with real production data
+
+
+PHASE 2 — JIRA INTEGRATION & REPORTING
+----------------------------------------------------------------
+
+  1. Create Jira tickets for prioritised findings
+  2. Update Jira tickets on SLA status changes
+  3. Auto-close Jira tickets when Tenable reports Fixed
+  4. Reopen Jira tickets for resurfaced vulnerabilities
+  5. Implement phased rollout controller (pilot → full)
+  6. Generate CSV vulnerability reports with filtering
+  7. Submit and manage risk acceptance exceptions
+
+================================================================
