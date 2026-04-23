@@ -1,0 +1,63 @@
+# VM Middleware — Simple Architecture
+
+## What
+
+A service that pulls vulnerability findings from Tenable, scores them against
+our business context, and creates Jira tickets for service teams to fix.
+
+## Why
+
+- Tenable has the data but no way to route it to teams
+- Jira has the workflow but no risk scoring
+- Service teams need prioritised, actionable tickets — not raw scan output
+
+## Flow
+
+```
+  Tenable Exposure Mgmt  →  Middleware  →  Jira
+                               │
+                               ▼
+                          PostgreSQL
+                               │
+                               ▼
+                          CSV Reports
+```
+
+1. **Pull** — daily call to Tenable's Inventory API
+2. **Enrich** — add portfolio, service, environment, criticality from tags
+3. **Score** — apply risk formula (VPR + asset criticality)
+4. **Reconcile** — compare with stored findings to detect new/fixed/recurring
+5. **Route** — create, update, close Jira tickets
+6. **Report** — generate CSV exports on demand
+
+## Components
+
+| Component | Role |
+|---|---|
+| Tenable Client | Calls the Inventory API |
+| Ingestion | Normalises findings into our schema |
+| Enrichment | Adds business context from tags |
+| Scoring Engine | Calculates risk score and rating |
+| SLA Engine | Computes due dates and breach status |
+| Reconciliation | Detects state changes (new, fixed, recurring, stale) |
+| Jira Integration | Manages ticket lifecycle |
+| API Service | Serves CSV reports and config |
+
+## Tech
+
+- **Python** + **PostgreSQL**
+- **AWS Lambda** runs the pipeline on a schedule
+- **ECS Fargate** hosts the API service
+- **Single source of truth**: Tenable's unified Inventory API
+
+## Key Decisions
+
+- **One Tenable API** — Inventory aggregates VM, Cloud, WAS, and container findings
+- **Finding ID is the key** — Tenable's stable ID drives deduplication and reconciliation
+- **Pull, don't listen** — We re-pull each run; no webhooks needed
+- **Tenable's state is truth** — Only `FIXED` status closes tickets; missing findings are flagged, not auto-closed
+
+## Status
+
+Phase 0 complete (pipeline works end-to-end locally).
+Phase 1 next (deploy to AWS, wire in tag filtering).
