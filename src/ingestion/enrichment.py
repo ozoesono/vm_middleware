@@ -1,4 +1,12 @@
-"""Enrichment sync — loads asset-to-business context mappings from CSV or database."""
+"""Enrichment sync — loads asset-to-business context mappings from CSV or database.
+
+Enrichment sources, in priority order:
+  1. CSV-based enrichment_mappings (manual override, highest priority)
+  2. Tenable tags (parsed via the tag taxonomy: Category-Value)
+
+Tags that don't follow the taxonomy (see tag_taxonomy.txt) are logged as
+warnings but otherwise ignored.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
 from src.common.models import EnrichmentMapping, FindingStaging
+from src.common.tag_parser import CATEGORY_TO_FIELD, parse_tags
 
 logger = get_logger("enrichment")
 
@@ -114,37 +123,82 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
     staged_findings = session.query(FindingStaging).filter(FindingStaging.run_id == run_id).all()
     enriched_count = 0
 
-    for sf in staged_findings:
-        mapping = None
+    invalid_tag_count = 0
 
-        # Try matching by asset_id first, then asset_name
+    for sf in staged_findings:
+        # Start by extracting whatever we can from Tenable tags (lower priority)
+        tag_enrichment = _extract_tag_enrichment(sf)
+        if tag_enrichment.get("_invalid_count", 0) > 0:
+            invalid_tag_count += tag_enrichment.pop("_invalid_count")
+
+        # Then try CSV/manual mapping (higher priority — overrides tag values)
+        mapping = None
         if sf.tenable_asset_id:
             mapping = lookup_by_id.get(sf.tenable_asset_id)
         if mapping is None and sf.asset_name:
             mapping = lookup_by_name.get(sf.asset_name.lower())
 
-        # Also try extracting enrichment from Tenable tags
-        if mapping is None and sf.tenable_tags:
-            # Tenable tags can carry portfolio/service/environment info
-            # This is a fallback — CSV/manual mappings take priority
-            continue
-
         if mapping:
-            # We store enrichment data on the staging record via tenable_tags field
-            # as a JSON dict that the reconciler will pick up
+            # CSV mapping wins — overlay it on top of tag-based enrichment
+            tag_enrichment.update({
+                "portfolio": mapping.portfolio or tag_enrichment.get("portfolio"),
+                "service": mapping.service or tag_enrichment.get("service"),
+                "environment": mapping.environment or tag_enrichment.get("environment"),
+                "data_sensitivity": mapping.data_sensitivity or tag_enrichment.get("data_sensitivity"),
+                "asset_criticality": mapping.asset_criticality or tag_enrichment.get("asset_criticality"),
+                "asset_criticality_score": mapping.asset_criticality_score or tag_enrichment.get("asset_criticality_score"),
+                "service_owner": mapping.service_owner or tag_enrichment.get("service_owner"),
+                "service_owner_team": mapping.service_owner_team or tag_enrichment.get("service_owner_team"),
+            })
+
+        # Persist enrichment under a reserved key in tenable_tags
+        if tag_enrichment:
             sf.tenable_tags = sf.tenable_tags or {}
-            sf.tenable_tags["_enrichment"] = {
-                "portfolio": mapping.portfolio,
-                "service": mapping.service,
-                "environment": mapping.environment,
-                "data_sensitivity": mapping.data_sensitivity,
-                "asset_criticality": mapping.asset_criticality,
-                "asset_criticality_score": mapping.asset_criticality_score,
-                "service_owner": mapping.service_owner,
-                "service_owner_team": mapping.service_owner_team,
-            }
+            sf.tenable_tags["_enrichment"] = tag_enrichment
             enriched_count += 1
 
     session.flush()
-    logger.info("enrichment_applied", enriched=enriched_count, total=len(staged_findings), run_id=str(run_id))
+    logger.info(
+        "enrichment_applied",
+        enriched=enriched_count,
+        total=len(staged_findings),
+        invalid_tags=invalid_tag_count,
+        run_id=str(run_id),
+    )
     return enriched_count
+
+
+def _extract_tag_enrichment(sf: FindingStaging) -> dict:
+    """Extract enrichment data from a staging finding's Tenable tags.
+
+    Parses tag_names using the taxonomy parser. Returns a dict of the
+    enrichment fields that could be populated from tags. Logs warnings
+    for any tags that don't conform to the taxonomy.
+    """
+    if not sf.tenable_tags or not isinstance(sf.tenable_tags, dict):
+        return {}
+
+    tag_names = sf.tenable_tags.get("tag_names") or []
+    if not tag_names:
+        return {}
+
+    parsed_dict, all_parsed = parse_tags(tag_names)
+
+    enrichment: dict = {}
+    for category, value in parsed_dict.items():
+        field = CATEGORY_TO_FIELD.get(category)
+        if field:
+            enrichment[field] = value
+
+    # If we parsed a Criticality tag, also populate the score
+    if enrichment.get("asset_criticality"):
+        enrichment["asset_criticality_score"] = CRITICALITY_SCORES.get(
+            enrichment["asset_criticality"].upper(), 0.25
+        )
+
+    # Track how many tags failed validation (caller logs the total)
+    invalid_count = sum(1 for p in all_parsed if not p.is_valid)
+    if invalid_count > 0:
+        enrichment["_invalid_count"] = invalid_count
+
+    return enrichment
