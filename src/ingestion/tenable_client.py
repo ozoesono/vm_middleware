@@ -169,7 +169,7 @@ class TenableClient:
         response = self.http_client.post(
             self.config.findings_endpoint,
             params=params,
-            json=body if body else None,
+            json=body,  # always send a body (even {}); API returns 415 otherwise
         )
         self._raise_for_status(response)
 
@@ -250,7 +250,7 @@ class TenableClient:
         response = self.http_client.post(
             self.config.export_endpoint,
             params=params,
-            json=body if body else None,
+            json=body,  # always send a body (even {})
         )
         self._raise_for_status(response)
 
