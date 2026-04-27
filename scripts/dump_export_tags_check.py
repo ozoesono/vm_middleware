@@ -31,7 +31,7 @@ c = httpx.Client(
 )
 
 # Try requesting EVERY tag-related property variant
-PROPS = "asset_name,asset_id,tag_names,tag_ids,tag_name,tag_id,tags,asset_tags,asset_tag_names"
+PROPS = "asset_name,tag_names,tag_ids"
 
 # Initiate
 print("Initiating export with maximum tag properties...")
@@ -94,7 +94,7 @@ for f in findings[:100]:
         if isinstance(extra, dict):
             extra_keys.update(extra.keys())
         # Count which tag-related fields are NON-NULL
-        for fld in ["tag_names", "tag_ids", "tag_name", "tag_id", "tags", "asset_tags", "asset_tag_names"]:
+        for fld in ["tag_names", "tag_ids"]:
             val = f.get(fld) or (extra.get(fld) if isinstance(extra, dict) else None)
             if val:
                 tag_field_counts[fld] = tag_field_counts.get(fld, 0) + 1
