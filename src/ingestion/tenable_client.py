@@ -183,17 +183,21 @@ class TenableClient:
             limit=pagination.get("limit", limit),
         )
 
-    def paginate_findings(
+    def iter_pages(
         self,
+        start_offset: int = 0,
         filters: list[dict] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Fetch ALL findings via synchronous paginated search.
+    ):
+        """Yield TenableFindingsPage objects, one per API call.
 
-        Uses: POST /api/v1/t1/inventory/findings/search
-        Best for: datasets under ~50,000 findings.
+        This is the streaming-friendly entry point. Caller can process
+        each page (filter, stage, commit) and persist a checkpoint
+        between pages so an interruption can resume from start_offset.
+
+        Yields:
+            TenableFindingsPage with .findings, .total, .offset, .limit
         """
-        all_findings: list[dict[str, Any]] = []
-        offset = 0
+        offset = start_offset
         limit = self.config.page_size
         total = None
 
@@ -204,20 +208,33 @@ class TenableClient:
                 total = page.total
                 logger.info("search_findings_total", total=total)
 
-            all_findings.extend(page.findings)
             logger.info(
                 "search_page_fetched",
                 offset=offset,
                 fetched=len(page.findings),
-                cumulative=len(all_findings),
                 total=total,
             )
 
-            if len(all_findings) >= total or len(page.findings) == 0:
-                break
+            yield page
 
             offset += limit
+            if offset >= total or len(page.findings) == 0:
+                break
 
+        logger.info("search_streaming_complete")
+
+    def paginate_findings(
+        self,
+        filters: list[dict] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch ALL findings via synchronous paginated search.
+
+        Backward-compatible wrapper around iter_pages() that accumulates
+        all results in memory. Use iter_pages() directly for streaming.
+        """
+        all_findings: list[dict[str, Any]] = []
+        for page in self.iter_pages(filters=filters):
+            all_findings.extend(page.findings)
         logger.info("search_complete", total_findings=len(all_findings))
         return all_findings
 

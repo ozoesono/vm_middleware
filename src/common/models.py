@@ -252,6 +252,12 @@ class PipelineRun(Base):
     jira_tickets_closed = Column(Integer, nullable=False, default=0)
     errors = Column(JSON, nullable=True)
 
+    # Streaming / resume checkpoint
+    last_offset = Column(Integer, nullable=False, default=0)
+    pages_completed = Column(Integer, nullable=False, default=0)
+    total_findings_expected = Column(Integer, nullable=True)
+    tag_filter = Column(JSON, nullable=True)
+
 
 # ---------------------------------------------------------------------------
 # Exceptions (risk acceptance)

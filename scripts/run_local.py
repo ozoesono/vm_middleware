@@ -72,6 +72,11 @@ def main():
         default=None,
         help="Severity filter (repeatable). e.g. --severity Critical --severity High",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume the most recent incomplete pipeline run (RUNNING/PARTIAL_FAILURE/FAILED)",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -109,6 +114,7 @@ def main():
         config=config,
         mock_fixture_path=mock_path,
         enrichment_csv_path=enrichment_path,
+        resume=args.resume,
     )
 
 

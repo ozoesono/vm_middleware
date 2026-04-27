@@ -1,11 +1,13 @@
-"""Pipeline runner — executes all steps in sequence for local development."""
+"""Pipeline runner — streams findings from Tenable, stages page-by-page,
+checkpoints progress, and resumes from the last successful page on restart.
+"""
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy.orm import Session
+from sqlalchemy import desc
 
 from src.common.config import AppConfig
 from src.common.db import get_session
@@ -13,123 +15,243 @@ from src.common.logging import get_logger, setup_logging
 from src.common.models import FindingStaging, JiraActionQueue, PipelineRun
 from src.ingestion.enrichment import apply_enrichment, load_enrichment_from_csv
 from src.ingestion.tenable_client import MockTenableClient, TenableClient
-from src.ingestion.tenable_ingestion import ingest_findings
+from src.ingestion.tenable_ingestion import filter_by_tags, ingest_findings
 from src.reconciliation.reconciler import reconcile
 
 logger = get_logger("pipeline")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _setup_or_resume_run(
+    session,
+    config: AppConfig,
+    resume: bool,
+) -> tuple[uuid.UUID, int, bool]:
+    """Either create a fresh run or resume an interrupted one.
+
+    Returns:
+        (run_id, start_offset, is_resume)
+    """
+    if resume:
+        # Look for the most recent RUNNING/PARTIAL_FAILURE/FAILED pipeline run
+        prev = (
+            session.query(PipelineRun)
+            .filter(PipelineRun.status.in_(["RUNNING", "PARTIAL_FAILURE", "FAILED"]))
+            .order_by(desc(PipelineRun.started_at))
+            .first()
+        )
+        if prev is not None:
+            # Verify the tag filter hasn't changed (otherwise resume would mix data)
+            prev_tags = sorted(prev.tag_filter or [])
+            cur_tags = sorted(config.tenable.tag_filter or [])
+            if prev_tags != cur_tags:
+                logger.warning(
+                    "resume_tag_mismatch_starting_fresh",
+                    previous=prev_tags,
+                    current=cur_tags,
+                )
+            else:
+                logger.info(
+                    "pipeline_resuming",
+                    run_id=str(prev.id),
+                    last_offset=prev.last_offset,
+                    pages_completed=prev.pages_completed,
+                )
+                prev.status = "RUNNING"
+                session.flush()
+                return prev.id, prev.last_offset, True
+
+    # Fresh run
+    run_id = uuid.uuid4()
+    pipeline_run = PipelineRun(
+        id=run_id,
+        started_at=_utcnow(),
+        status="RUNNING",
+        trigger="manual",
+        tag_filter=config.tenable.tag_filter,
+    )
+    session.add(pipeline_run)
+    session.flush()
+    return run_id, 0, False
 
 
 def run_pipeline(
     config: AppConfig,
     mock_fixture_path: str | None = None,
     enrichment_csv_path: str | None = None,
+    resume: bool = False,
 ) -> PipelineRun:
-    """Execute the full pipeline: enrich → ingest → score/reconcile.
+    """Execute the streaming pipeline.
+
+    Steps:
+        1. Setup or resume a pipeline run
+        2. Sync enrichment data
+        3. Stream findings from Tenable, page by page:
+             - Filter client-side by tag
+             - Stage in DB, commit
+             - Update checkpoint
+        4. Apply enrichment to staged findings
+        5. Reconcile (state transitions, scoring, SLA)
+        6. Mark run complete
 
     Args:
-        config: Application configuration
-        mock_fixture_path: If provided, use MockTenableClient with this fixture
-        enrichment_csv_path: If provided, load enrichment data from this CSV
+        resume: If True, attempt to resume the most recent incomplete run.
     """
-    run_id = uuid.uuid4()
     setup_logging(config.settings.log_level)
 
-    logger.info("pipeline_start", run_id=str(run_id))
-
     with get_session() as session:
-        # Create pipeline run record
-        pipeline_run = PipelineRun(
-            id=run_id,
-            started_at=datetime.utcnow(),
-            status="RUNNING",
-            trigger="manual",
+        run_id, start_offset, is_resume = _setup_or_resume_run(session, config, resume)
+        session.commit()
+
+        logger.info(
+            "pipeline_start",
+            run_id=str(run_id),
+            start_offset=start_offset,
+            is_resume=is_resume,
         )
-        session.add(pipeline_run)
-        session.flush()
 
         try:
-            # Step 1: Enrichment sync
-            logger.info("step_1_enrichment_sync")
-            if enrichment_csv_path:
-                enrichment_count = load_enrichment_from_csv(enrichment_csv_path, session)
-                logger.info("enrichment_loaded", count=enrichment_count)
+            # Step 1: Enrichment sync (skip on resume — already done)
+            if not is_resume and enrichment_csv_path:
+                logger.info("step_1_enrichment_sync")
+                count = load_enrichment_from_csv(enrichment_csv_path, session)
+                logger.info("enrichment_loaded", count=count)
+                session.commit()
 
-            # Step 2: Tenable ingestion
-            logger.info("step_2_tenable_ingestion")
+            # Step 2: Stream Tenable findings (with checkpoint per page)
+            logger.info("step_2_tenable_ingestion_streaming")
+
             if mock_fixture_path:
-                client = MockTenableClient(fixture_path=mock_fixture_path)
+                _run_mock(session, config, run_id, mock_fixture_path)
             else:
-                client = TenableClient(
-                    config=config.tenable,
-                    access_key=config.settings.tenable_access_key,
-                    secret_key=config.settings.tenable_secret_key,
-                )
+                _run_streaming(session, config, run_id, start_offset)
 
-            try:
-                raw_findings = client.fetch_findings()
-                pipeline_run.findings_fetched = len(raw_findings)
-
-                staged_count = ingest_findings(
-                    raw_findings,
-                    run_id,
-                    session,
-                    tag_filter=config.tenable.tag_filter,
-                )
-                logger.info("ingestion_complete", staged=staged_count)
-            finally:
-                client.close()
-
-            # Step 2b: Apply enrichment to staged findings
-            logger.info("step_2b_apply_enrichment")
+            # Step 3: Apply enrichment to all staged findings
+            logger.info("step_3_apply_enrichment")
             apply_enrichment(session, run_id)
+            session.commit()
 
-            # Step 3: Scoring & Reconciliation
-            logger.info("step_3_scoring_reconciliation")
+            # Step 4: Reconciliation
+            logger.info("step_4_scoring_reconciliation")
             recon_stats = reconcile(session, config, run_id)
 
-            # Update pipeline run stats
-            pipeline_run.findings_new = recon_stats.findings_new
-            pipeline_run.findings_updated = recon_stats.findings_updated
-            pipeline_run.findings_remediated = recon_stats.findings_remediated
-            pipeline_run.findings_recurred = recon_stats.findings_recurred
-            pipeline_run.findings_stale = recon_stats.findings_stale
+            # Update final stats
+            run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+            run.findings_new = recon_stats.findings_new
+            run.findings_updated = recon_stats.findings_updated
+            run.findings_remediated = recon_stats.findings_remediated
+            run.findings_recurred = recon_stats.findings_recurred
+            run.findings_stale = recon_stats.findings_stale
 
-            # Step 4: Log Jira action queue (no actual Jira calls in Phase 0)
-            jira_actions = (
+            # Step 5: Log Jira queue (not actually called in Phase 0)
+            actions = (
                 session.query(JiraActionQueue)
                 .filter(JiraActionQueue.run_id == run_id)
-                .all()
+                .count()
             )
-            logger.info("step_4_jira_queue", actions=len(jira_actions))
-            for action in jira_actions:
-                logger.info(
-                    "jira_action_queued",
-                    action=action.action,
-                    finding_id=str(action.finding_id),
-                    payload=action.payload,
-                )
+            logger.info("step_5_jira_queue", actions=actions)
 
-            # Clean up staging table for this run
+            # Clean up staging for this run
             session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
 
-            # Mark run as complete
-            pipeline_run.status = "SUCCESS"
-            pipeline_run.completed_at = datetime.utcnow()
-            pipeline_run.errors = recon_stats.errors if recon_stats.errors else None
+            run.status = "SUCCESS"
+            run.completed_at = _utcnow()
+            session.commit()
 
         except Exception as e:
             logger.error("pipeline_error", error=str(e), run_id=str(run_id))
-            pipeline_run.status = "FAILED"
-            pipeline_run.completed_at = datetime.utcnow()
-            pipeline_run.errors = [str(e)]
+            run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+            if run is not None:
+                run.status = "PARTIAL_FAILURE"  # so it can be resumed
+                run.completed_at = _utcnow()
+                run.errors = [str(e)]
+                session.commit()
             raise
 
-        finally:
-            session.flush()
+        run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+        _print_summary(run)
+        return run
 
-    # Print summary
-    _print_summary(pipeline_run)
-    return pipeline_run
+
+def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> None:
+    """Stream findings from Tenable page-by-page, with per-page commit + checkpoint."""
+    client = TenableClient(
+        config=config.tenable,
+        access_key=config.settings.tenable_access_key,
+        secret_key=config.settings.tenable_secret_key,
+    )
+
+    try:
+        total_fetched_this_session = 0
+        total_kept_this_session = 0
+        page_num = 0
+
+        for page in client.iter_pages(start_offset=start_offset):
+            page_num += 1
+
+            # Update total expected on the run record (first page only)
+            if page_num == 1:
+                run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+                run.total_findings_expected = page.total
+                session.commit()
+
+            # Filter client-side by tag
+            kept = filter_by_tags(page.findings, config.tenable.tag_filter)
+
+            # Stage them
+            ingest_findings(kept, run_id, session, tag_filter=None)
+            # ^ tag_filter=None because we already filtered above
+
+            # Update checkpoint
+            run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+            run.last_offset = page.offset + len(page.findings)
+            run.pages_completed += 1
+            run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
+            session.commit()
+
+            total_fetched_this_session += len(page.findings)
+            total_kept_this_session += len(kept)
+
+            logger.info(
+                "page_committed",
+                page_num=page_num,
+                offset=page.offset,
+                next_offset=run.last_offset,
+                fetched_this_page=len(page.findings),
+                kept_this_page=len(kept),
+                fetched_total=run.findings_fetched,
+                expected_total=run.total_findings_expected,
+                progress_pct=round(100 * run.findings_fetched / max(run.total_findings_expected or 1, 1), 1),
+            )
+
+        logger.info(
+            "streaming_done",
+            run_id=str(run_id),
+            fetched_this_session=total_fetched_this_session,
+            kept_this_session=total_kept_this_session,
+        )
+    finally:
+        client.close()
+
+
+def _run_mock(session, config, run_id: uuid.UUID, fixture_path: str) -> None:
+    """Mock path: read fixture in one go (no streaming needed)."""
+    client = MockTenableClient(fixture_path=fixture_path)
+    try:
+        raw_findings = client.fetch_findings()
+        run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+        run.total_findings_expected = len(raw_findings)
+        run.findings_fetched = len(raw_findings)
+        session.commit()
+
+        kept = filter_by_tags(raw_findings, config.tenable.tag_filter)
+        ingest_findings(kept, run_id, session, tag_filter=None)
+        session.commit()
+    finally:
+        client.close()
 
 
 def _print_summary(run: PipelineRun) -> None:
@@ -144,7 +266,10 @@ def _print_summary(run: PipelineRun) -> None:
     print("=" * 60)
     print(f"  Run ID:            {run.id}")
     print(f"  Status:            {run.status}")
+    print(f"  Pages completed:   {run.pages_completed}")
+    print(f"  Last offset:       {run.last_offset}")
     print(f"  Findings fetched:  {run.findings_fetched}")
+    print(f"  Expected total:    {run.total_findings_expected}")
     print(f"  New:               {run.findings_new}")
     print(f"  Updated:           {run.findings_updated}")
     print(f"  Remediated:        {run.findings_remediated}")
