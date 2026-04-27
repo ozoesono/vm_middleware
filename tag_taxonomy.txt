@@ -1,0 +1,200 @@
+================================================================
+TENABLE EXPOSURE MANAGEMENT — TAG NAMING TAXONOMY
+================================================================
+
+PURPOSE
+----------------------------------------------------------------
+The Tenable Inventory API returns tags as flat strings (e.g. "Prod")
+with no category context. To preserve category information for
+downstream processing in the VM Middleware, the category must be
+encoded into the tag name itself.
+
+This taxonomy defines the standard format for all tags created in
+Tenable Exposure Management.
+
+
+THE RULE
+----------------------------------------------------------------
+Format:    <Category>-<Value>
+Casing:    PascalCase
+Separator: Hyphen ( - )
+
+Both Category and Value use PascalCase. The first hyphen separates
+them. Multi-word values continue using hyphens.
+
+Parsing rule (used by the middleware):
+   "Split on the FIRST hyphen.
+    Everything before = category.
+    Everything after  = value."
+
+
+WHY SINGLE-WORD CATEGORIES
+----------------------------------------------------------------
+Multi-word categories cause ambiguous parsing. Example:
+
+   Asset-Criticality-Critical
+       Is the category "Asset" with value "Criticality-Critical"?
+       Or category "Asset-Criticality" with value "Critical"?
+
+To avoid this, all categories must be a single PascalCase word.
+
+
+APPROVED CATEGORIES
+----------------------------------------------------------------
+Use these categories. Do not invent new ones without governance
+review.
+
+   Portfolio       — Business unit / portfolio ownership
+   Service         — The service the asset supports
+   Environment     — prod / staging / dev / non-prod / etc.
+   Sensitivity     — Data classification of the asset
+   Criticality     — Business criticality of the asset
+   Owner           — Responsible team or individual
+   Region          — AWS region or geographic location
+   Compliance      — Compliance scope (PCI, GDPR, etc.)
+   Application     — Application name (if different from Service)
+
+
+VALUE FORMATTING
+----------------------------------------------------------------
+Single-word values:    UseInitialCap
+                        Examples: Prod, Critical, Confidential
+
+Multi-word values:     Pascal-Case-With-Hyphens
+                        Examples: Payment-Api, Non-Prod,
+                                  Customer-Portal, Internal-Only
+
+Forbidden in values:   spaces, underscores, special chars
+                        (only letters, digits, and hyphens allowed)
+
+
+EXAMPLES
+----------------------------------------------------------------
+
+  Portfolio-Payments
+  Portfolio-Customer-Experience
+  Portfolio-Data-Platform
+
+  Service-Payment-Api
+  Service-Checkout-Service
+  Service-Web-Gateway
+  Service-Customer-Portal
+
+  Environment-Prod
+  Environment-Staging
+  Environment-Dev
+  Environment-Non-Prod
+
+  Sensitivity-Public
+  Sensitivity-Internal
+  Sensitivity-Confidential
+  Sensitivity-Restricted
+
+  Criticality-Critical
+  Criticality-High
+  Criticality-Medium
+  Criticality-Low
+
+  Owner-Team-Payments
+  Owner-Team-Platform
+  Owner-Team-Customer
+
+  Region-Eu-West-2
+  Region-Us-East-1
+
+  Compliance-Pci-Dss
+  Compliance-Gdpr
+
+  Application-Datahub
+  Application-Branch-Copilot
+
+
+NAMING RULES
+----------------------------------------------------------------
+1. Always use PascalCase for both category and value.
+2. Use hyphens, never spaces, underscores, or camelCase.
+3. Categories are always a single word.
+4. Multi-word values use hyphens between words.
+5. Be consistent: "Prod" not "PROD" or "production".
+6. Avoid abbreviations unless universally understood (Api is OK,
+   Pci is OK, but avoid less-common shortenings).
+7. Do not use the same value across categories with different
+   meanings. If "Critical" exists under Criticality, do not also
+   use "Critical" as a value under another category.
+
+
+HOW TO CREATE A TAG IN TENABLE EXPOSURE MANAGEMENT
+----------------------------------------------------------------
+When creating a tag in the Tenable UI:
+
+   Category field:    leave it as a UI-only grouping if you want
+                      (e.g. "Environment"), but understand the
+                      API will not return this field.
+
+   Value field:       enter the FULL taxonomic name here.
+                      Example: Environment-Prod
+
+The Value field is what the middleware sees, so the full
+"Category-Value" string MUST go into the Value field.
+
+Example UI entry:
+   Category:  Environment        (UI grouping only)
+   Value:     Environment-Prod   (this is what the API returns)
+
+
+DYNAMIC TAG RULES (RECOMMENDED)
+----------------------------------------------------------------
+Where possible, create tags as DYNAMIC with rules that apply them
+automatically to assets matching specific criteria. Examples:
+
+  Environment-Prod
+     Rule: AWS tag "Environment" equals "prod"
+        OR Asset name starts with "prod-"
+
+  Portfolio-Payments
+     Rule: AWS tag "Portfolio" equals "payments"
+
+  Region-Eu-West-2
+     Rule: Asset region equals "eu-west-2"
+
+This ensures tags stay accurate as the asset inventory changes,
+without manual tagging effort.
+
+
+GOVERNANCE
+----------------------------------------------------------------
+1. New CATEGORIES require approval (rare — should be a stable set).
+2. New VALUES under existing categories can be added freely, but
+   must follow the formatting rules above.
+3. The VM team reviews tag taxonomy compliance quarterly.
+4. Tags created by other Tenable modules (legacy VM module, etc.)
+   that don't follow this convention should be migrated or
+   ignored by the middleware.
+
+
+MIGRATION FROM EXISTING TAGS
+----------------------------------------------------------------
+The Tenable instance currently has ~91 tags pulled from other
+Tenable modules. These do NOT follow this taxonomy and will not
+be parsed by the middleware.
+
+Recommended approach:
+1. Create new Exposure Management tags following this taxonomy.
+2. Apply them to assets via dynamic rules where possible.
+3. Leave legacy tags in place (they don't interfere).
+4. Over time, the new tags become the source of truth for
+   business context.
+
+
+PARSING EXAMPLES (for reference)
+----------------------------------------------------------------
+Input tag:                    Parsed output:
+  Portfolio-Payments       →    category=Portfolio, value=Payments
+  Service-Payment-Api      →    category=Service,   value=Payment-Api
+  Environment-Non-Prod     →    category=Environment, value=Non-Prod
+  Owner-Team-Payments      →    category=Owner,     value=Team-Payments
+
+Tags that do NOT match the format (no hyphen, or unknown category)
+will be ignored by the enrichment engine and logged for review.
+
+================================================================
