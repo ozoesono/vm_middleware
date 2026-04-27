@@ -125,19 +125,45 @@ print("=" * 70)
 print(f"  STEP 3: Fetching findings on tagged assets")
 print("=" * 70)
 
-# Try filtering findings by tag_ids contains [tag_id]
+# Try multiple filter syntaxes — the Tenable UI uses tag_names = <name>
 EXTRA_PROPS = "asset_name,sensor_type,tag_names,tag_ids,finding_vpr_score,finding_cves"
-response = client.post(
-    "/api/v1/t1/inventory/findings/search",
-    params={"offset": 0, "limit": 5, "extra_properties": EXTRA_PROPS},
-    json={"filters": [{"property": "tag_ids", "operator": "contains", "value": [tag_id]}]},
-)
 
-if response.status_code != 200:
-    print(f"  Filter on findings endpoint failed: {response.status_code}")
-    print(f"  {response.text[:300]}")
-    print()
-    print("  Falling back: fetching unfiltered findings to find tagged ones...")
+attempts = [
+    ("tag_names = name (string)",      {"filters": [{"property": "tag_names", "operator": "=", "value": tag_name}]}),
+    ("tag_names equals name",          {"filters": [{"property": "tag_names", "operator": "equals", "value": tag_name}]}),
+    ("tag_names has [name]",           {"filters": [{"property": "tag_names", "operator": "has", "value": [tag_name]}]}),
+    ("tag_names contains [name]",      {"filters": [{"property": "tag_names", "operator": "contains", "value": [tag_name]}]}),
+    ("tag_names contains name",        {"filters": [{"property": "tag_names", "operator": "contains", "value": tag_name}]}),
+    ("tag_names is_one_of [name]",     {"filters": [{"property": "tag_names", "operator": "is_one_of", "value": [tag_name]}]}),
+    ("tag_ids = id (string)",          {"filters": [{"property": "tag_ids", "operator": "=", "value": tag_id}]}),
+    ("tag_ids equals id",              {"filters": [{"property": "tag_ids", "operator": "equals", "value": tag_id}]}),
+    ("tag_ids has [id]",               {"filters": [{"property": "tag_ids", "operator": "has", "value": [tag_id]}]}),
+    ("tag_ids contains [id]",          {"filters": [{"property": "tag_ids", "operator": "contains", "value": [tag_id]}]}),
+]
+
+response = None
+working_filter = None
+for label, body in attempts:
+    print(f"\n  Trying: {label}")
+    r = client.post(
+        "/api/v1/t1/inventory/findings/search",
+        params={"offset": 0, "limit": 5, "extra_properties": EXTRA_PROPS},
+        json=body,
+    )
+    if r.status_code != 200:
+        print(f"    {r.status_code} {r.text[:200]}")
+        continue
+    total = r.json().get("pagination", {}).get("total", 0)
+    n = len(r.json().get("data", []))
+    print(f"    OK — total={total:,}  returned={n}")
+    if total > 0:
+        response = r
+        working_filter = (label, body)
+        print(f"    >>> THIS WORKS <<<")
+        break
+
+if not response:
+    print("\n  No tag-based filter returned results. Falling back to unfiltered scan...")
     response = client.post(
         "/api/v1/t1/inventory/findings/search",
         params={"offset": 0, "limit": 50, "extra_properties": EXTRA_PROPS},
@@ -148,7 +174,11 @@ if response.status_code == 200:
     data = response.json()
     findings = data.get("data", [])
     total = data.get("pagination", {}).get("total", 0)
-    print(f"  Total findings: {total:,}")
+    print(f"\n  Total findings: {total:,}")
+    if working_filter:
+        print(f"  Working filter: {working_filter[0]}")
+        import json as _json
+        print(f"  Body: {_json.dumps(working_filter[1])}")
 
     # Find findings whose tag_names contains our target
     tagged_findings = []
