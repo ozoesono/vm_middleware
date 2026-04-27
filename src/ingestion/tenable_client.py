@@ -158,7 +158,7 @@ class TenableClient:
             "offset": offset,
             "limit": limit,
             "extra_properties": self.config.extra_properties,
-            "sort": "severity:desc",
+            "sort": "finding_severity:desc",
         }
 
         body: dict[str, Any] = {}
