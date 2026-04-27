@@ -86,6 +86,14 @@ def main():
     if args.mode:
         config.tenable.retrieval_mode = args.mode
         print(f">>> retrieval_mode override: {args.mode}")
+
+    # Warn on incompatible combos
+    if args.tag and (args.mode == "export" or config.tenable.retrieval_mode == "export"):
+        print()
+        print("!!! WARNING: --mode export does NOT return tag data from Tenable.")
+        print("!!! Tag filter will drop ALL findings.")
+        print("!!! Use --mode search (default) or omit --mode when filtering by tag.")
+        print()
     if args.severity:
         config.tenable.severity_filter = args.severity
         print(f">>> severity_filter override: {args.severity}")
