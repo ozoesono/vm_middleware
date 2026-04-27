@@ -2,8 +2,24 @@
 """Local pipeline runner entry point.
 
 Usage:
-    python scripts/run_local.py              # Run with real Tenable API
-    python scripts/run_local.py --mock       # Run with mock fixture data
+    python scripts/run_local.py
+    python scripts/run_local.py --mock
+    python scripts/run_local.py --tag Portfolio-Business-Growth
+    python scripts/run_local.py --tag Portfolio-Business-Growth --tag Portfolio-Payments
+    python scripts/run_local.py --mode export --tag Portfolio-Business-Growth
+
+Tag filter:
+    --tag X (repeatable). Only findings whose tag_names contain at least
+    one of the supplied tags will be kept. Filtering is client-side
+    because the Tenable Inventory API doesn't support server-side tag
+    filters reliably.
+
+Retrieval mode:
+    --mode search (default) — synchronous paginated, good for small datasets
+    --mode export — async bulk export, recommended for >50k findings
+
+Severity filter:
+    --severity Critical --severity High (repeatable)
 """
 
 import argparse
@@ -38,12 +54,41 @@ def main():
         default="config",
         help="Path to config directory (default: config)",
     )
+    parser.add_argument(
+        "--tag",
+        action="append",
+        default=None,
+        help="Client-side tag filter (repeatable). e.g. --tag Portfolio-Business-Growth",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["search", "export"],
+        default=None,
+        help="Tenable retrieval mode: search (sync) or export (async bulk)",
+    )
+    parser.add_argument(
+        "--severity",
+        action="append",
+        default=None,
+        help="Severity filter (repeatable). e.g. --severity Critical --severity High",
+    )
     args = parser.parse_args()
 
     # Load config
     os.environ.setdefault("CONFIG_DIR", args.config_dir)
     settings = AppSettings(config_dir=args.config_dir)
     config = AppConfig(settings=settings)
+
+    # Apply CLI overrides
+    if args.tag:
+        config.tenable.tag_filter = args.tag
+        print(f">>> tag_filter override: {args.tag}")
+    if args.mode:
+        config.tenable.retrieval_mode = args.mode
+        print(f">>> retrieval_mode override: {args.mode}")
+    if args.severity:
+        config.tenable.severity_filter = args.severity
+        print(f">>> severity_filter override: {args.severity}")
 
     # Initialise DB
     init_db(settings.database_url)
