@@ -272,7 +272,7 @@ class TenableClient:
         elapsed = 0
         while elapsed < max_wait:
             response = self.http_client.get(
-                f"/api/v1/export/{export_id}/status"
+                f"/api/v1/t1/inventory/export/{export_id}/status"
             )
             self._raise_for_status(response)
 
@@ -303,7 +303,7 @@ class TenableClient:
         for chunk_id in chunk_ids:
             logger.info("export_downloading_chunk", export_id=export_id, chunk_id=chunk_id)
             response = self.http_client.get(
-                f"/api/v1/export/{export_id}/download/{chunk_id}"
+                f"/api/v1/t1/inventory/export/{export_id}/download/{chunk_id}"
             )
             self._raise_for_status(response)
 
