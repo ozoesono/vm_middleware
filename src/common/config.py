@@ -93,6 +93,10 @@ class TenableConfig(BaseModel):
         "ipv4_addresses,product"
     )
     severity_filter: list[str] | None = None
+    # Client-side tag filter — only findings whose tag_names include ANY of these
+    # are kept. None = no filter (keep everything). Filtering happens after
+    # ingestion because the Tenable Inventory API doesn't reliably accept tag filters.
+    tag_filter: list[str] | None = None
     stale_threshold_days: int = 7
     request_timeout_seconds: int = 120
     max_retries: int = 3

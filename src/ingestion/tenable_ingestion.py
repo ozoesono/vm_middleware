@@ -181,16 +181,59 @@ def normalise_finding(finding: dict[str, Any], run_id: uuid.UUID) -> FindingStag
     )
 
 
+def filter_by_tags(
+    findings: list[dict[str, Any]],
+    tag_filter: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Apply client-side tag filtering.
+
+    Keeps any finding whose tag_names array contains AT LEAST ONE of the
+    tags in tag_filter. If tag_filter is None or empty, returns findings
+    unchanged.
+
+    The Tenable Inventory API doesn't reliably accept server-side tag
+    filtering for findings, so we filter in our code instead.
+    """
+    if not tag_filter:
+        return findings
+
+    wanted = {t.strip() for t in tag_filter if t}
+    if not wanted:
+        return findings
+
+    kept: list[dict[str, Any]] = []
+    for f in findings:
+        extra = f.get("extra_properties", {}) or {}
+        tag_names = extra.get("tag_names") or []
+        if isinstance(tag_names, list) and any(t in wanted for t in tag_names):
+            kept.append(f)
+
+    logger.info(
+        "tag_filter_applied",
+        wanted_tags=list(wanted),
+        before=len(findings),
+        after=len(kept),
+        dropped=len(findings) - len(kept),
+    )
+    return kept
+
+
 def ingest_findings(
     findings: list[dict[str, Any]],
     run_id: uuid.UUID,
     session: Session,
     batch_size: int = 500,
+    tag_filter: list[str] | None = None,
 ) -> int:
     """Normalise and insert findings into the staging table.
 
+    If tag_filter is provided, findings are filtered client-side first.
+
     Returns the number of findings staged.
     """
+    if tag_filter:
+        findings = filter_by_tags(findings, tag_filter)
+
     # Clear staging table for this run
     session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
     session.flush()

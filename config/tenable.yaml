@@ -22,6 +22,13 @@ tenable:
   # Filter findings by severity (null = all severities)
   severity_filter: null
 
+  # Client-side tag filter — only findings with at least one of these tag_names
+  # will be kept after ingestion. null = no filter (keep all findings).
+  # The Tenable Inventory API doesn't reliably support server-side tag filtering,
+  # so we filter in our code using the tag_names field returned in each finding.
+  # Example: ["Portfolio-Business-Growth", "Portfolio-Payments"]
+  tag_filter: null
+
   # Days before a missing finding is marked STALE (not auto-closed)
   stale_threshold_days: 7
 

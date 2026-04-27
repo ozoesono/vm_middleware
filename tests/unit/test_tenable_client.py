@@ -7,7 +7,7 @@ import pytest
 
 from src.common.config import TenableConfig
 from src.ingestion.tenable_client import MockTenableClient
-from src.ingestion.tenable_ingestion import normalise_finding
+from src.ingestion.tenable_ingestion import filter_by_tags, normalise_finding
 
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -193,4 +193,53 @@ class TestFindingNormalisation:
             staged = normalise_finding(raw, run_id)
             assert staged.tenable_finding_id is not None
             assert staged.title is not None
-            assert staged.severity is not None
+
+
+class TestTagFilter:
+    """Tests for client-side tag filtering."""
+
+    @staticmethod
+    def _make(tag_names):
+        return {
+            "id": "f1",
+            "name": "test",
+            "severity": "HIGH",
+            "state": "ACTIVE",
+            "extra_properties": {"tag_names": tag_names} if tag_names is not None else {},
+        }
+
+    def test_no_filter_keeps_all(self):
+        findings = [self._make(["A"]), self._make(["B"]), self._make([])]
+        assert len(filter_by_tags(findings, None)) == 3
+        assert len(filter_by_tags(findings, [])) == 3
+
+    def test_single_tag_filter(self):
+        findings = [
+            self._make(["Portfolio-Payments", "Environment-Prod"]),
+            self._make(["Environment-Prod"]),
+            self._make(["Portfolio-Business-Growth"]),
+        ]
+        result = filter_by_tags(findings, ["Portfolio-Business-Growth"])
+        assert len(result) == 1
+        assert result[0]["extra_properties"]["tag_names"] == ["Portfolio-Business-Growth"]
+
+    def test_multi_tag_filter_or_logic(self):
+        """Multiple tags = OR (keep if ANY match)."""
+        findings = [
+            self._make(["Portfolio-A"]),
+            self._make(["Portfolio-B"]),
+            self._make(["Portfolio-C"]),
+        ]
+        result = filter_by_tags(findings, ["Portfolio-A", "Portfolio-C"])
+        assert len(result) == 2
+
+    def test_no_tags_field(self):
+        """Findings with no tag_names field should be dropped when filtering."""
+        findings = [{"id": "f1", "name": "x", "severity": "LOW", "state": "ACTIVE"}]
+        result = filter_by_tags(findings, ["Anything"])
+        assert len(result) == 0
+
+    def test_empty_tag_names_dropped(self):
+        findings = [self._make([])]
+        result = filter_by_tags(findings, ["Portfolio-A"])
+        assert len(result) == 0

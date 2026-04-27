@@ -69,7 +69,12 @@ def run_pipeline(
                 raw_findings = client.fetch_findings()
                 pipeline_run.findings_fetched = len(raw_findings)
 
-                staged_count = ingest_findings(raw_findings, run_id, session)
+                staged_count = ingest_findings(
+                    raw_findings,
+                    run_id,
+                    session,
+                    tag_filter=config.tenable.tag_filter,
+                )
                 logger.info("ingestion_complete", staged=staged_count)
             finally:
                 client.close()
