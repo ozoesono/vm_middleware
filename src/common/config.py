@@ -35,6 +35,17 @@ class ScoringConfig(BaseModel):
     active_model: str = "custom"  # "custom" | "lumin_ces"
     custom: CustomScoringConfig = Field(default_factory=CustomScoringConfig)
     lumin: LuminScoringConfig = Field(default_factory=LuminScoringConfig)
+    # Criticality label → numeric score (0.0 - 1.0). Drives the ACS component.
+    criticality_scores: dict[str, float] = Field(
+        default_factory=lambda: {
+            "CRITICAL": 1.0,
+            "HIGH": 0.75,
+            "MEDIUM": 0.50,
+            "LOW": 0.25,
+        }
+    )
+    # Default ACS when an asset has no Criticality tag (so scoring can still run).
+    default_criticality_score: float = 0.25
 
 
 class SLAConfig(BaseModel):

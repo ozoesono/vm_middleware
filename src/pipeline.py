@@ -13,8 +13,12 @@ from src.common.config import AppConfig
 from src.common.db import get_session
 from src.common.logging import get_logger, setup_logging
 from src.common.models import FindingStaging, JiraActionQueue, PipelineRun
-from src.ingestion.enrichment import apply_enrichment, load_enrichment_from_csv
-from src.ingestion.tagged_assets import fetch_tagged_asset_ids
+from src.ingestion.enrichment import (
+    apply_asset_tags_enrichment,
+    apply_enrichment,
+    load_enrichment_from_csv,
+)
+from src.ingestion.tagged_assets import fetch_tagged_assets_with_tags
 from src.ingestion.tenable_client import MockTenableClient, TenableClient
 from src.ingestion.tenable_ingestion import (
     filter_by_asset_ids,
@@ -134,8 +138,24 @@ def run_pipeline(
             else:
                 _run_streaming(session, config, run_id, start_offset)
 
-            # Step 3: Apply enrichment to all staged findings
-            logger.info("step_3_apply_enrichment")
+            # Step 3a: Apply tag-based enrichment from the asset_tags_map (if any)
+            run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+            asset_tags_map = None
+            if run.asset_ids_for_run and isinstance(run.asset_ids_for_run, dict):
+                asset_tags_map = run.asset_ids_for_run.get("tags")
+            if asset_tags_map:
+                logger.info("step_3a_apply_tag_enrichment")
+                apply_asset_tags_enrichment(
+                    session=session,
+                    run_id=run_id,
+                    asset_tags_map=asset_tags_map,
+                    criticality_scores=config.scoring.criticality_scores,
+                    default_criticality_score=config.scoring.default_criticality_score,
+                )
+                session.commit()
+
+            # Step 3b: CSV-based enrichment (manual overrides on top of tag enrichment)
+            logger.info("step_3b_apply_csv_enrichment")
             apply_enrichment(session, run_id)
             session.commit()
 
@@ -199,24 +219,38 @@ def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> Non
 
 
 def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> None:
-    """Tagged-asset path: fetch asset_ids first, then batched server-side filter."""
+    """Tagged-asset path: fetch asset_ids+tags first, then batched server-side filter."""
     run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
 
     # Either resume an existing asset list or fetch fresh
     if run.asset_ids_for_run:
-        asset_ids = run.asset_ids_for_run
+        # asset_ids_for_run on resume holds {"ids": [...], "tags": {asset_id: [tag_names]}}
+        stored = run.asset_ids_for_run
+        if isinstance(stored, dict):
+            asset_ids = stored.get("ids", [])
+            asset_tags_map = stored.get("tags", {})
+        else:
+            # Older runs stored just a list — degrade gracefully
+            asset_ids = stored
+            asset_tags_map = {}
         start_batch = run.last_batch_idx
-        logger.info("resuming_batched_fetch", batch_idx=start_batch, total_assets=len(asset_ids))
+        logger.info(
+            "resuming_batched_fetch",
+            batch_idx=start_batch,
+            total_assets=len(asset_ids),
+            with_tags=bool(asset_tags_map),
+        )
     else:
         logger.info("step_2a_fetching_tagged_assets", tags=config.tenable.tag_filter)
-        tagged = fetch_tagged_asset_ids(
+        asset_tags_map = fetch_tagged_assets_with_tags(
             config=config.tenable,
             access_key=config.settings.tenable_access_key,
             secret_key=config.settings.tenable_secret_key,
             tag_names=config.tenable.tag_filter,
         )
-        asset_ids = sorted(tagged)  # deterministic ordering for resume
-        run.asset_ids_for_run = asset_ids
+        asset_ids = sorted(asset_tags_map.keys())  # deterministic ordering for resume
+        # Save both the ordered ID list AND the per-asset tag map for resume
+        run.asset_ids_for_run = {"ids": asset_ids, "tags": asset_tags_map}
         session.commit()
         start_batch = 0
         logger.info("step_2a_tagged_assets_done", asset_count=len(asset_ids))

@@ -75,31 +75,36 @@ def _fetch_assets_page(
     return response.json()
 
 
-def fetch_tagged_asset_ids(
+def fetch_tagged_assets_with_tags(
     config: TenableConfig,
     access_key: str,
     secret_key: str,
     tag_names: list[str],
     page_size: int = 1000,
-) -> set[str]:
-    """Fetch the set of asset_ids that have any of the supplied tag names.
+) -> dict[str, list[str]]:
+    """Fetch tagged assets and return a dict mapping asset_id → ALL tag_names.
+
+    Even though the filter is for one tag (e.g. Portfolio-Business-Growth),
+    we capture every tag attached to each matching asset (Criticality-X,
+    Environment-Y, etc.) so the middleware can enrich findings with the
+    full business context.
 
     Args:
         config: TenableConfig (used for base_url, timeout)
         access_key/secret_key: Tenable API credentials
-        tag_names: list of tag names like ["Portfolio-Business-Growth"]
+        tag_names: filter tag names like ["Portfolio-Business-Growth"]
         page_size: assets per page (default 1000)
 
     Returns:
-        Set of asset_id strings.
+        dict[asset_id, list[tag_name]]
     """
     if not tag_names:
-        return set()
+        return {}
 
     text_query = _build_advanced_query(tag_names)
     logger.info("tagged_assets_fetch_start", tags=tag_names, query=text_query)
 
-    asset_ids: set[str] = set()
+    asset_tags: dict[str, list[str]] = {}
     offset = 0
     total: int | None = None
 
@@ -125,14 +130,20 @@ def fetch_tagged_asset_ids(
                 if not aid:
                     extra = a.get("extra_properties", {}) or {}
                     aid = extra.get("asset_id")
-                if aid:
-                    asset_ids.add(aid)
+                if not aid:
+                    continue
+                # Capture all tag_names on this asset
+                extra = a.get("extra_properties", {}) or {}
+                tag_list = extra.get("tag_names") or []
+                if not isinstance(tag_list, list):
+                    tag_list = []
+                asset_tags[aid] = tag_list
 
             logger.info(
                 "tagged_assets_page",
                 offset=offset,
                 fetched=len(page),
-                cumulative=len(asset_ids),
+                cumulative=len(asset_tags),
                 total=total,
             )
 
@@ -140,5 +151,18 @@ def fetch_tagged_asset_ids(
             if offset >= (total or 0) or len(page) == 0:
                 break
 
-    logger.info("tagged_assets_fetch_complete", asset_count=len(asset_ids))
-    return asset_ids
+    logger.info("tagged_assets_fetch_complete", asset_count=len(asset_tags))
+    return asset_tags
+
+
+def fetch_tagged_asset_ids(
+    config: TenableConfig,
+    access_key: str,
+    secret_key: str,
+    tag_names: list[str],
+    page_size: int = 1000,
+) -> set[str]:
+    """Backward-compatible wrapper that returns just the set of asset_ids."""
+    return set(
+        fetch_tagged_assets_with_tags(config, access_key, secret_key, tag_names, page_size).keys()
+    )

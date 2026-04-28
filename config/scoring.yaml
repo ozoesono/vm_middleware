@@ -14,3 +14,15 @@ scoring:
       critical: 800
       high: 600
       medium: 400
+
+  # Criticality label → numeric score (drives the ACS component).
+  # Asset criticality is read from the Criticality-* tag on each asset.
+  # Tune these values to match your business model.
+  criticality_scores:
+    CRITICAL: 1.0
+    HIGH: 0.75
+    MEDIUM: 0.50
+    LOW: 0.25
+
+  # Used when an asset has no Criticality tag.
+  default_criticality_score: 0.25

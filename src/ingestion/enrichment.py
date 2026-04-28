@@ -100,6 +100,86 @@ def load_enrichment_from_csv(csv_path: str, session: Session) -> int:
     return count
 
 
+def apply_asset_tags_enrichment(
+    session: Session,
+    run_id: uuid.UUID,
+    asset_tags_map: dict[str, list[str]] | None,
+    criticality_scores: dict[str, float],
+    default_criticality_score: float,
+) -> int:
+    """Enrich staged findings using a pre-fetched asset_id → tag_names map.
+
+    For each finding in the staging table:
+      - look up its asset_id in the map
+      - parse the asset's tag_names through the taxonomy parser
+      - populate enrichment fields (portfolio, service, environment, etc.)
+      - set asset_criticality_score from the Criticality-* tag value
+
+    Args:
+        asset_tags_map: dict[asset_id, list[tag_name]] from tagged_assets fetch
+        criticality_scores: e.g. {"CRITICAL": 1.0, "HIGH": 0.75, ...}
+        default_criticality_score: ACS to use if no Criticality tag is present
+
+    Returns the number of findings enriched.
+    """
+    if not asset_tags_map:
+        logger.info("apply_asset_tags_no_map_skipping")
+        return 0
+
+    staged = session.query(FindingStaging).filter(FindingStaging.run_id == run_id).all()
+    enriched = 0
+    missing_criticality = 0
+
+    for sf in staged:
+        if not sf.tenable_asset_id:
+            continue
+        tag_names = asset_tags_map.get(sf.tenable_asset_id)
+        if not tag_names:
+            continue
+
+        parsed_dict, _ = parse_tags(tag_names)
+
+        # Build the enrichment payload from parsed tags
+        criticality_label = parsed_dict.get("Criticality")
+        if criticality_label:
+            crit_score = criticality_scores.get(
+                criticality_label.upper(), default_criticality_score
+            )
+        else:
+            missing_criticality += 1
+            criticality_label = None
+            crit_score = default_criticality_score
+
+        enrichment_payload = {
+            "portfolio": parsed_dict.get("Portfolio"),
+            "service": parsed_dict.get("Service"),
+            "environment": parsed_dict.get("Environment"),
+            "data_sensitivity": parsed_dict.get("Sensitivity"),
+            "asset_criticality": criticality_label,
+            "asset_criticality_score": crit_score,
+            "service_owner_team": parsed_dict.get("Owner"),
+        }
+
+        # Persist on the staging record under tenable_tags["_enrichment"]
+        sf.tenable_tags = sf.tenable_tags or {}
+        existing = sf.tenable_tags.get("_enrichment", {})
+        existing.update({k: v for k, v in enrichment_payload.items() if v is not None})
+        sf.tenable_tags["_enrichment"] = existing
+        # Always set criticality score (even default) so scoring works
+        sf.tenable_tags["_enrichment"]["asset_criticality_score"] = crit_score
+        enriched += 1
+
+    session.flush()
+    logger.info(
+        "asset_tags_enrichment_applied",
+        enriched=enriched,
+        total_staged=len(staged),
+        missing_criticality=missing_criticality,
+        run_id=str(run_id),
+    )
+    return enriched
+
+
 def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
     """Apply enrichment data to staged findings.
 
