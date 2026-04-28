@@ -239,6 +239,115 @@ class TenableClient:
         return all_findings
 
     # ==================================================================
+    # Server-side filtered fetch by asset_id
+    # ==================================================================
+
+    def iter_findings_by_asset_ids(
+        self,
+        asset_ids: list[str],
+        batch_size: int = 500,
+        start_batch: int = 0,
+    ):
+        """Yield TenableFindingsPage filtered server-side by a batch of asset_ids.
+
+        The Tenable findings/search endpoint accepts a structured filter ONLY
+        when paired with query.mode=simple and query.text="". For each batch of
+        asset_ids, this issues one (or more, if paginated) requests and yields
+        the resulting findings.
+
+        Yields tuples of (batch_idx, page) so the pipeline can checkpoint.
+
+        Args:
+            asset_ids: full list of asset_ids to filter for
+            batch_size: how many asset_ids per request (Tenable accepts arrays)
+            start_batch: which batch index to resume from (0 = start fresh)
+        """
+        total_batches = (len(asset_ids) + batch_size - 1) // batch_size
+        logger.info(
+            "asset_id_batched_fetch_start",
+            total_asset_ids=len(asset_ids),
+            batch_size=batch_size,
+            total_batches=total_batches,
+            start_batch=start_batch,
+        )
+
+        for batch_idx in range(start_batch, total_batches):
+            batch = asset_ids[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+
+            offset = 0
+            limit = self.config.page_size
+            total = None
+
+            while True:
+                page = self._fetch_page_with_asset_filter(
+                    asset_ids=batch,
+                    offset=offset,
+                    limit=limit,
+                )
+                if total is None:
+                    total = page.total
+                    logger.info(
+                        "asset_id_batch_fetched",
+                        batch_idx=batch_idx,
+                        of=total_batches,
+                        batch_asset_count=len(batch),
+                        findings_in_batch=total,
+                    )
+
+                yield batch_idx, page
+
+                offset += limit
+                if offset >= total or len(page.findings) == 0:
+                    break
+
+        logger.info("asset_id_batched_fetch_complete")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        retry=retry_if_exception_type(TenableRateLimitError),
+    )
+    def _fetch_page_with_asset_filter(
+        self,
+        asset_ids: list[str],
+        offset: int,
+        limit: int,
+    ) -> TenableFindingsPage:
+        """Fetch one page of findings filtered by asset_ids.
+
+        Required payload shape (per discovery, not per docs):
+            {
+                "query": {"mode": "simple", "text": ""},
+                "filters": [{"property": "asset_id", "operator": "=", "value": [...]}]
+            }
+        """
+        params = {
+            "offset": offset,
+            "limit": limit,
+            "extra_properties": self.config.extra_properties,
+        }
+        body = {
+            "query": {"mode": "simple", "text": ""},
+            "filters": [
+                {"property": "asset_id", "operator": "=", "value": asset_ids}
+            ],
+        }
+        response = self.http_client.post(
+            self.config.findings_endpoint,
+            params=params,
+            json=body,
+        )
+        self._raise_for_status(response)
+        data = response.json()
+        pagination = data.get("pagination", {})
+        return TenableFindingsPage(
+            findings=data.get("data", []),
+            total=pagination.get("total", 0),
+            offset=pagination.get("offset", offset),
+            limit=pagination.get("limit", limit),
+        )
+
+    # ==================================================================
     # MODE 2: Asynchronous Export
     # POST /api/v1/t1/inventory/export/findings  → poll → download
     # ==================================================================

@@ -182,26 +182,53 @@ def run_pipeline(
 
 
 def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> None:
-    """Stream findings from Tenable page-by-page, with per-page commit + checkpoint.
+    """Stream findings from Tenable.
 
-    When a tag_filter is configured, first fetches the set of asset_ids that
-    have that tag (via the assets/search endpoint with advanced query),
-    then filters streamed findings by asset_id IN the set. This is more
-    reliable than filtering by tag_names on the finding itself.
+    Two paths:
+      A) tag_filter is set:
+         - Pre-flight: fetch asset_ids for the tag via assets/search (advanced)
+         - Then call findings/search batched by asset_id (server-side filter)
+         - Way faster: only the matching findings come back
+      B) No tag_filter:
+         - Fall back to streaming all findings (legacy path)
     """
-    # If filtering by tag, build the asset_id set upfront
-    tagged_asset_ids: set[str] | None = None
     if config.tenable.tag_filter:
+        _run_streaming_by_tagged_assets(session, config, run_id)
+    else:
+        _run_streaming_all(session, config, run_id, start_offset)
+
+
+def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> None:
+    """Tagged-asset path: fetch asset_ids first, then batched server-side filter."""
+    run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+
+    # Either resume an existing asset list or fetch fresh
+    if run.asset_ids_for_run:
+        asset_ids = run.asset_ids_for_run
+        start_batch = run.last_batch_idx
+        logger.info("resuming_batched_fetch", batch_idx=start_batch, total_assets=len(asset_ids))
+    else:
         logger.info("step_2a_fetching_tagged_assets", tags=config.tenable.tag_filter)
-        tagged_asset_ids = fetch_tagged_asset_ids(
+        tagged = fetch_tagged_asset_ids(
             config=config.tenable,
             access_key=config.settings.tenable_access_key,
             secret_key=config.settings.tenable_secret_key,
             tag_names=config.tenable.tag_filter,
         )
-        logger.info("step_2a_tagged_assets_done", asset_count=len(tagged_asset_ids))
-        if not tagged_asset_ids:
-            logger.warning("no_tagged_assets_found_pipeline_will_stage_nothing")
+        asset_ids = sorted(tagged)  # deterministic ordering for resume
+        run.asset_ids_for_run = asset_ids
+        session.commit()
+        start_batch = 0
+        logger.info("step_2a_tagged_assets_done", asset_count=len(asset_ids))
+
+    if not asset_ids:
+        logger.warning("no_tagged_assets_found_nothing_to_fetch")
+        return
+
+    batch_size = 500
+    total_batches = (len(asset_ids) + batch_size - 1) // batch_size
+    run.total_batches = total_batches
+    session.commit()
 
     client = TenableClient(
         config=config.tenable,
@@ -210,71 +237,93 @@ def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> Non
     )
 
     try:
-        total_fetched_this_session = 0
-        total_kept_this_session = 0
-        page_num = 0
+        current_batch = start_batch
+        for batch_idx, page in client.iter_findings_by_asset_ids(
+            asset_ids=asset_ids,
+            batch_size=batch_size,
+            start_batch=start_batch,
+        ):
+            # Stage findings from this page (no client-side filter — server already did it)
+            try:
+                ingest_findings(
+                    page.findings, run_id, session,
+                    tag_filter=None,
+                    clear_staging=False,
+                )
+            except Exception as e:
+                logger.error("batch_staging_failed", error=str(e)[:200], batch_idx=batch_idx)
+                session.rollback()
+                raise
 
+            # Update checkpoint
+            run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+            run.last_batch_idx = batch_idx + 1  # next one to do
+            run.pages_completed += 1
+            run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
+            session.commit()
+
+            if batch_idx != current_batch:
+                # Just moved to a new batch
+                current_batch = batch_idx
+
+            logger.info(
+                "batch_page_committed",
+                batch_idx=batch_idx,
+                of=total_batches,
+                staged_this_page=len(page.findings),
+                fetched_total=run.findings_fetched,
+                progress_pct=round(100 * (batch_idx + 1) / max(total_batches, 1), 1),
+            )
+
+        logger.info("batched_fetch_done", run_id=str(run_id))
+    finally:
+        client.close()
+
+
+def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) -> None:
+    """No-tag path: stream all findings (legacy, slow on full datasets)."""
+    client = TenableClient(
+        config=config.tenable,
+        access_key=config.settings.tenable_access_key,
+        secret_key=config.settings.tenable_secret_key,
+    )
+
+    try:
+        page_num = 0
         for page in client.iter_pages(start_offset=start_offset):
             page_num += 1
 
-            # Update total expected on the run record (first page only)
             if page_num == 1:
                 run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
                 run.total_findings_expected = page.total
                 session.commit()
 
-            # Filter client-side by asset_id (preferred) or tag_names (fallback)
-            if tagged_asset_ids is not None:
-                kept = filter_by_asset_ids(page.findings, tagged_asset_ids)
-            else:
-                kept = filter_by_tags(page.findings, config.tenable.tag_filter)
-
-            # Stage them — accumulate (don't clear), and tolerate bad rows
             try:
                 ingest_findings(
-                    kept, run_id, session,
-                    tag_filter=None,         # already filtered above
-                    clear_staging=False,     # accumulate across pages
+                    page.findings, run_id, session,
+                    tag_filter=None,
+                    clear_staging=False,
                 )
             except Exception as e:
-                # If staging fails entirely, rollback so we don't poison the session
-                logger.error(
-                    "page_staging_failed",
-                    error=str(e)[:200],
-                    offset=page.offset,
-                )
+                logger.error("page_staging_failed", error=str(e)[:200], offset=page.offset)
                 session.rollback()
-                # Don't advance the checkpoint — caller can retry / resume
                 raise
 
-            # Update checkpoint
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.last_offset = page.offset + len(page.findings)
             run.pages_completed += 1
             run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
             session.commit()
 
-            total_fetched_this_session += len(page.findings)
-            total_kept_this_session += len(kept)
-
             logger.info(
                 "page_committed",
                 page_num=page_num,
                 offset=page.offset,
                 next_offset=run.last_offset,
-                fetched_this_page=len(page.findings),
-                kept_this_page=len(kept),
                 fetched_total=run.findings_fetched,
                 expected_total=run.total_findings_expected,
                 progress_pct=round(100 * run.findings_fetched / max(run.total_findings_expected or 1, 1), 1),
             )
-
-        logger.info(
-            "streaming_done",
-            run_id=str(run_id),
-            fetched_this_session=total_fetched_this_session,
-            kept_this_session=total_kept_this_session,
-        )
     finally:
         client.close()
 

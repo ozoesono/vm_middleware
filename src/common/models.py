@@ -258,6 +258,11 @@ class PipelineRun(Base):
     total_findings_expected = Column(Integer, nullable=True)
     tag_filter = Column(JSON, nullable=True)
 
+    # Batched (server-side asset_id filter) checkpoint
+    asset_ids_for_run = Column(JSON, nullable=True)  # frozen list for resume
+    last_batch_idx = Column(Integer, nullable=False, default=0)
+    total_batches = Column(Integer, nullable=True)
+
 
 # ---------------------------------------------------------------------------
 # Exceptions (risk acceptance)
