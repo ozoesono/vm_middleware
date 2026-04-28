@@ -201,9 +201,23 @@ def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> Non
             # Filter client-side by tag
             kept = filter_by_tags(page.findings, config.tenable.tag_filter)
 
-            # Stage them
-            ingest_findings(kept, run_id, session, tag_filter=None)
-            # ^ tag_filter=None because we already filtered above
+            # Stage them — accumulate (don't clear), and tolerate bad rows
+            try:
+                ingest_findings(
+                    kept, run_id, session,
+                    tag_filter=None,         # already filtered above
+                    clear_staging=False,     # accumulate across pages
+                )
+            except Exception as e:
+                # If staging fails entirely, rollback so we don't poison the session
+                logger.error(
+                    "page_staging_failed",
+                    error=str(e)[:200],
+                    offset=page.offset,
+                )
+                session.rollback()
+                # Don't advance the checkpoint — caller can retry / resume
+                raise
 
             # Update checkpoint
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()

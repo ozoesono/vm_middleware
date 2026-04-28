@@ -39,7 +39,7 @@ class Finding(Base):
 
     # Tenable finding data
     title = Column(String(1000), nullable=False)
-    cve_id = Column(String(50), nullable=True)
+    cve_id = Column(String(100), nullable=True)
     severity = Column(String(20), nullable=False)  # Critical/High/Medium/Low/Info
     vpr_score = Column(Float, nullable=True)
     acr = Column(Integer, nullable=True)  # Asset Criticality Rating 1-10
@@ -47,8 +47,8 @@ class Finding(Base):
     epss_score = Column(Float, nullable=True)  # 0-100
     exploit_maturity = Column(String(50), nullable=True)
     cvssv3_score = Column(Float, nullable=True)
-    source = Column(String(50), nullable=True)  # Nessus/CloudSecurity/WAS
-    plugin_id = Column(String(50), nullable=True)
+    source = Column(String(100), nullable=True)  # Nessus/CloudSecurity/WAS
+    plugin_id = Column(String(500), nullable=True)  # Tenable detection IDs can be long composite strings
     solution = Column(Text, nullable=True)
 
     # Asset details
@@ -117,7 +117,7 @@ class FindingStaging(Base):
 
     # Raw Tenable data
     title = Column(String(1000), nullable=False)
-    cve_id = Column(String(50), nullable=True)
+    cve_id = Column(String(100), nullable=True)
     severity = Column(String(20), nullable=False)
     vpr_score = Column(Float, nullable=True)
     acr = Column(Integer, nullable=True)
@@ -125,8 +125,8 @@ class FindingStaging(Base):
     epss_score = Column(Float, nullable=True)
     exploit_maturity = Column(String(50), nullable=True)
     cvssv3_score = Column(Float, nullable=True)
-    source = Column(String(50), nullable=True)
-    plugin_id = Column(String(50), nullable=True)
+    source = Column(String(100), nullable=True)
+    plugin_id = Column(String(500), nullable=True)
     solution = Column(Text, nullable=True)
     tenable_state = Column(String(20), nullable=True)
 
