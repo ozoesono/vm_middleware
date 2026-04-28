@@ -14,8 +14,13 @@ from src.common.db import get_session
 from src.common.logging import get_logger, setup_logging
 from src.common.models import FindingStaging, JiraActionQueue, PipelineRun
 from src.ingestion.enrichment import apply_enrichment, load_enrichment_from_csv
+from src.ingestion.tagged_assets import fetch_tagged_asset_ids
 from src.ingestion.tenable_client import MockTenableClient, TenableClient
-from src.ingestion.tenable_ingestion import filter_by_tags, ingest_findings
+from src.ingestion.tenable_ingestion import (
+    filter_by_asset_ids,
+    filter_by_tags,
+    ingest_findings,
+)
 from src.reconciliation.reconciler import reconcile
 
 logger = get_logger("pipeline")
@@ -177,7 +182,27 @@ def run_pipeline(
 
 
 def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> None:
-    """Stream findings from Tenable page-by-page, with per-page commit + checkpoint."""
+    """Stream findings from Tenable page-by-page, with per-page commit + checkpoint.
+
+    When a tag_filter is configured, first fetches the set of asset_ids that
+    have that tag (via the assets/search endpoint with advanced query),
+    then filters streamed findings by asset_id IN the set. This is more
+    reliable than filtering by tag_names on the finding itself.
+    """
+    # If filtering by tag, build the asset_id set upfront
+    tagged_asset_ids: set[str] | None = None
+    if config.tenable.tag_filter:
+        logger.info("step_2a_fetching_tagged_assets", tags=config.tenable.tag_filter)
+        tagged_asset_ids = fetch_tagged_asset_ids(
+            config=config.tenable,
+            access_key=config.settings.tenable_access_key,
+            secret_key=config.settings.tenable_secret_key,
+            tag_names=config.tenable.tag_filter,
+        )
+        logger.info("step_2a_tagged_assets_done", asset_count=len(tagged_asset_ids))
+        if not tagged_asset_ids:
+            logger.warning("no_tagged_assets_found_pipeline_will_stage_nothing")
+
     client = TenableClient(
         config=config.tenable,
         access_key=config.settings.tenable_access_key,
@@ -198,8 +223,11 @@ def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> Non
                 run.total_findings_expected = page.total
                 session.commit()
 
-            # Filter client-side by tag
-            kept = filter_by_tags(page.findings, config.tenable.tag_filter)
+            # Filter client-side by asset_id (preferred) or tag_names (fallback)
+            if tagged_asset_ids is not None:
+                kept = filter_by_asset_ids(page.findings, tagged_asset_ids)
+            else:
+                kept = filter_by_tags(page.findings, config.tenable.tag_filter)
 
             # Stage them — accumulate (don't clear), and tolerate bad rows
             try:

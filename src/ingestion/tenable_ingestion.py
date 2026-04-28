@@ -185,14 +185,11 @@ def filter_by_tags(
     findings: list[dict[str, Any]],
     tag_filter: list[str] | None,
 ) -> list[dict[str, Any]]:
-    """Apply client-side tag filtering.
+    """Apply client-side tag filtering using tag_names from each finding.
 
     Keeps any finding whose tag_names array contains AT LEAST ONE of the
-    tags in tag_filter. If tag_filter is None or empty, returns findings
-    unchanged.
-
-    The Tenable Inventory API doesn't reliably accept server-side tag
-    filtering for findings, so we filter in our code instead.
+    tags in tag_filter. tag_names is unreliable in the export endpoint,
+    so this is a fallback — prefer filter_by_asset_ids.
     """
     if not tag_filter:
         return findings
@@ -211,6 +208,40 @@ def filter_by_tags(
     logger.info(
         "tag_filter_applied",
         wanted_tags=list(wanted),
+        before=len(findings),
+        after=len(kept),
+        dropped=len(findings) - len(kept),
+    )
+    return kept
+
+
+def filter_by_asset_ids(
+    findings: list[dict[str, Any]],
+    asset_id_set: set[str] | None,
+) -> list[dict[str, Any]]:
+    """Filter findings to only those whose asset_id is in asset_id_set.
+
+    This is the preferred filtering method — asset_id is always present
+    on a finding, unlike tag_names which is sometimes empty.
+
+    The asset_id_set is built upfront by tagged_assets.fetch_tagged_asset_ids().
+    """
+    if asset_id_set is None:
+        return findings
+    if not asset_id_set:
+        # explicitly empty set — drop everything
+        logger.info("asset_id_filter_empty_set_drops_all", before=len(findings))
+        return []
+
+    kept: list[dict[str, Any]] = []
+    for f in findings:
+        aid = f.get("asset_id")
+        if aid and aid in asset_id_set:
+            kept.append(f)
+
+    logger.info(
+        "asset_id_filter_applied",
+        target_count=len(asset_id_set),
         before=len(findings),
         after=len(kept),
         dropped=len(findings) - len(kept),
