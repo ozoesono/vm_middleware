@@ -1,707 +1,841 @@
-# VM Middleware -- Architecture Document (v2)
+# VM Middleware — Architecture Document (v3)
 
-> **Version**: 2.0
-> **Status**: Phase 0 (Foundation) -- implemented and operational
-> **Last updated**: 2026-04-16
+> **Version**: 3.0
+> **Status**: Phase 0 + risk-scoring + reporting — implemented and operational
+> **Last updated**: 2026-05-20
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Tenable One Inventory API -- Single Source of Truth](#2-tenable-one-inventory-api----single-source-of-truth)
-3. [Reconciliation Engine](#3-reconciliation-engine)
+2. [Tenable One Inventory API — Source of Truth](#2-tenable-one-inventory-api--source-of-truth)
+3. [Tag Taxonomy & Filtering Strategy](#3-tag-taxonomy--filtering-strategy)
 4. [Pipeline Flow](#4-pipeline-flow)
-5. [Data Model](#5-data-model)
-6. [Scoring Engine](#6-scoring-engine)
-7. [SLA Policy](#7-sla-policy)
-8. [Enrichment](#8-enrichment)
-9. [Jira Ticketing](#9-jira-ticketing)
-10. [Project Structure](#10-project-structure)
-11. [Technology Stack](#11-technology-stack)
-12. [Configuration Reference](#12-configuration-reference)
-13. [Phase Alignment](#13-phase-alignment)
-14. [Key Design Decisions](#14-key-design-decisions)
-15. [Non-Functional Requirements](#15-non-functional-requirements)
+5. [Reconciliation Engine](#5-reconciliation-engine)
+6. [Data Model](#6-data-model)
+7. [Scoring Engine](#7-scoring-engine)
+8. [SLA Policy](#8-sla-policy)
+9. [Enrichment Sources](#9-enrichment-sources)
+10. [NVD Enrichment](#10-nvd-enrichment)
+11. [CSV Reporting](#11-csv-reporting)
+12. [Jira Ticketing (planned)](#12-jira-ticketing-planned)
+13. [Project Structure](#13-project-structure)
+14. [Technology Stack](#14-technology-stack)
+15. [Configuration Reference](#15-configuration-reference)
+16. [Phase Alignment](#16-phase-alignment)
+17. [Key Design Decisions](#17-key-design-decisions)
+18. [Non-Functional Requirements](#18-non-functional-requirements)
 
 ---
 
 ## 1. System Overview
 
 The VM Middleware is a vulnerability management orchestration system that ingests
-findings from the Tenable One Inventory API, enriches them with business context,
-applies configurable risk scoring, detects remediations via state reconciliation,
-and creates Jira tickets for service teams.
+findings from the Tenable One Inventory API (Exposure Management), enriches them
+with business context (portfolio, service, environment, asset criticality),
+applies a configurable risk-scoring formula, detects remediations via state
+reconciliation, enriches CVEs with NVD descriptions and remediation references,
+and produces CSV reports for risk reporting.
 
-### Architecture Diagram
+### 1.1 Architecture Diagram
 
 ```
-+----------------------------------------------------------------------+
-|                         TENABLE ONE PLATFORM                         |
-|  +----------+  +----------------+  +-------+  +-----------+         |
-|  | Nessus   |  | Cloud Security |  |  WAS  |  | 3rd-Party |         |
-|  | (VM)     |  | (CNAPP)        |  |       |  | Connectors|         |
-|  +----+-----+  +-------+--------+  +---+---+  +-----+-----+         |
-|       |                |                |            |               |
-|       +--------+-------+-------+--------+            |               |
-|                |               |                     |               |
-|          +-----v---------------v---------------------v-----+         |
-|          |     Tenable One Inventory (Exposure Mgmt)       |         |
-|          |     Unified findings across all modules          |         |
-|          +--+--------------------------------------------+--+         |
-|             |                                            |           |
-|   POST /api/v1/t1/inventory/         POST /api/v1/t1/inventory/      |
-|     findings/search (sync)             export/findings (async)       |
-+---------|-------------------------------------------|---------+
-          |                                           |
-          +-------------------+  +--------------------+
-                              |  |
-                              v  v
-+----------------------------------------------------------------------+
-|                        VM MIDDLEWARE                                  |
-|                                                                      |
-|  +--------------------+     +------------------+                     |
-|  | Tenable Client     |     | Enrichment       |                     |
-|  | (httpx + tenacity) |     | (CSV / AWS Tags) |                     |
-|  +---------+----------+     +--------+---------+                     |
-|            |                         |                               |
-|            v                         v                               |
-|  +--------------------+     +------------------+                     |
-|  | Ingestion          |---->| Staging Table    |                     |
-|  | (normalise + stage)|     | (findings_staging)|                    |
-|  +--------------------+     +--------+---------+                     |
-|                                      |                               |
-|                              +-------v--------+                      |
-|                              | Reconciliation  |                     |
-|                              | Engine          |                     |
-|                              | (state mgmt)    |                     |
-|                              +---+----+---+----+                     |
-|                                  |    |   |                          |
-|                          +-------+    |   +-------+                  |
-|                          v            v           v                  |
-|                   +----------+  +---------+  +---------+             |
-|                   | Scoring  |  | SLA     |  | Jira    |             |
-|                   | Engine   |  | Calc    |  | Action  |             |
-|                   +----------+  +---------+  | Queue   |             |
-|                                              +---------+             |
-|                                                  |                   |
-|  +-------------------+     +---------------------v------+            |
-|  | CSV Reports       |     | Jira Integration           |            |
-|  | (Phase 2)         |     | (Phase 1-2)                |            |
-|  +-------------------+     +----------------------------+            |
-|                                                                      |
-|  +-----------------------------------------------------------+      |
-|  |                     PostgreSQL 16                          |      |
-|  |  findings | findings_staging | enrichment_mappings |       |      |
-|  |  jira_action_queue | pipeline_runs | risk_exceptions       |      |
-|  +-----------------------------------------------------------+      |
-+----------------------------------------------------------------------+
++--------------------------------------------------------------------------+
+|                         TENABLE ONE PLATFORM                              |
+|                                                                          |
+|   Nessus (VM)      Cloud Security      WAS         3rd-party connectors  |
+|         \\               |               /              /                  |
+|          +-------> Inventory layer (Exposure Mgmt) <----+                |
+|                              |                                           |
+|     +------------------------+--------------------------+                |
+|     |                                                   |                |
+|  POST /api/v1/t1/inventory/             POST /api/v1/t1/inventory/       |
+|     assets/search                          findings/search               |
+|     (advanced query: tag filter)           (server-side asset_id filter) |
++-----|---------------------------------------------------|----------------+
+      |                                                   |
+      v                                                   v
++--------------------------------------------------------------------------+
+|                            VM MIDDLEWARE                                  |
+|                                                                          |
+|   1. Pre-flight (when --tag is set)                                       |
+|      assets/search advanced query 'Assets HAS tag_names = "X"'            |
+|         -> dict[asset_id -> tag_names list]                               |
+|                                                                          |
+|   2. Streaming ingestion (page-by-page commit, resume-safe)               |
+|      Batches of 500 asset_ids -> findings/search server-side filter       |
+|         -> findings_staging table (per pipeline run)                      |
+|                                                                          |
+|   3. Enrichment                                                          |
+|      a. From Tenable tags: portfolio/service/environment/criticality      |
+|      b. From CSV overrides (optional manual corrections)                  |
+|      c. From NVD: CVE description, CVSS, CWE, references (cached)         |
+|                                                                          |
+|   4. Reconciliation                                                      |
+|      Joins findings_staging with findings on tenable_finding_id           |
+|      State transitions: NEW / STILL OPEN / REMEDIATED / RECURRENCE / STALE|
+|      Risk formula applied: (VPR x w_vpr) + (ACS x w_acs)                  |
+|      SLA dates calculated                                                 |
+|      Jira action queue populated                                          |
+|                                                                          |
+|   5. CSV reporting                                                        |
+|      generate_report.py CLI                                              |
+|      Six reports: findings / risk-summary / sla-breaches /                |
+|      sla-approaching / recurrence / portfolio-summary                     |
+|                                                                          |
+|   PostgreSQL 16                                                          |
+|     findings | findings_staging | enrichment_mappings | cve_details      |
+|     jira_action_queue | pipeline_runs | risk_exceptions                  |
++--------------------------------------------------------------------------+
+```
 
-Deployment (Phase 2):
-  - Lambda: pipeline execution (triggered by EventBridge cron)
-  - ECS Fargate: API service (FastAPI, on-demand queries)
-  - RDS PostgreSQL: persistent storage
-  - No S3 -- all data in PostgreSQL
+### 1.2 What changed since v2
+
+This is v3 because several substantive things were added since the v2 document
+(2026-04-16):
+
+| Area | Change |
+|------|--------|
+| Filter strategy | Discovered Tenable's findings/search rejects most structured filters but **accepts asset_id filter when paired with `query.mode=simple` + `query.text=""`**. Plus assets/search **accepts advanced query syntax**. The pipeline now uses both. |
+| Pre-flight | Tagged-asset pre-fetch builds an in-memory `asset_id → tag_names` map; **all** asset tags (not just the filter tag) get captured for enrichment. |
+| Streaming | Pipeline now processes findings page-by-page with per-page commit and a checkpoint, so a 15-minute run is interruption-safe. `--resume` flag added. |
+| Batched fetch | Findings are pulled in batches of 500 asset_ids per request (server-side filter), so we no longer pull all 4.4M findings to keep ~163K. |
+| Tag taxonomy | Formal naming convention: `Category-Value` in PascalCase (single-word categories). `tag_parser` module validates and parses. |
+| Asset-tag enrichment | New enrichment path: parses each asset's tag_names, populates portfolio / service / environment / criticality / sensitivity / owner on every finding. |
+| Configurable criticality | Criticality labels → ACS scores are now in `config/scoring.yaml`, not hardcoded. |
+| NVD enrichment | `cve_details` table caches NVD descriptions, CVSS, CWE, and references. Tenable doesn't return descriptions for Cloud Security findings; NVD fills that gap. |
+| CSV reporting | Six report types via `generate_report.py`. The findings report includes rich Description and Solution columns built from NVD + Tenable data. |
+
+---
+
+## 2. Tenable One Inventory API — Source of Truth
+
+The Tenable Inventory API is the unified aggregation layer over every Tenable
+module (VM, Cloud Security, WAS, container security, third-party connectors).
+Each finding carries a `sensor_type` indicating its origin module.
+
+### 2.1 Endpoints used
+
+| Endpoint | Used for |
+|---|---|
+| `POST /api/v1/t1/inventory/findings/properties` | Discover valid filter/extra-property names |
+| `POST /api/v1/t1/inventory/assets/search` | Pre-fetch tagged asset IDs (with advanced query) |
+| `POST /api/v1/t1/inventory/findings/search` | Stream findings, batched by asset_id |
+| `POST /api/v1/t1/inventory/findings/export` | Available but **not used**: doesn't return tag data |
+
+### 2.2 Field name reality (vs documentation)
+
+Many property names differ from what older Tenable docs suggest. The names
+the middleware actually uses (verified via `/findings/properties`):
+
+| Concept | Property name |
+|---|---|
+| Finding identifier | `id` (top-level), referred to as `tenable_finding_id` in our DB |
+| Asset reference | `asset_id` (top-level) |
+| State | `state` (top-level) — values: `ACTIVE`, `FIXED`, `RESURFACED`, `NEW` |
+| Severity | `severity` (top-level — uppercase) |
+| VPR | `finding_vpr_score` |
+| CVE list | `finding_cves` (list, take first) |
+| CVSS v3 | `finding_cvss3_base_score` |
+| Solution | `finding_solution` *(often null for Cloud Security findings)* |
+| Plugin ID | `finding_detection_id` |
+| Tags | `tag_names` + `tag_ids` (lists) |
+| Source module | `sensor_type` (e.g. `NESSUS`, `CLOUD_SCAN`, `CS:AC_AWS`, `WAS`) |
+| Asset class | `asset_class` |
+| First/last observed | `first_observed_at`, `last_observed_at` |
+
+### 2.3 API quirks discovered
+
+| Behaviour | Workaround |
+|---|---|
+| POST endpoints return **415 Unsupported Media Type** if you send `json=None` | Always send `json={}` even with no filters |
+| Sort by `severity:desc` returns **400 unknown query property** | Use `finding_severity:desc` |
+| `findings/search` **silently ignores** structured `filters` for tag fields | Use advanced query on `assets/search`, then filter findings by `asset_id` |
+| `findings/search` only supports `query.mode=simple` (advanced returns 500) | Combine `query.mode=simple` + `query.text=""` with structured `filters` |
+| The working filter operator is `=`, not `eq` | Always use `"operator": "="`, value as a **list** |
+| `findings/export` endpoint **doesn't return tag data** | Don't use export mode when filtering by tag |
+| `finding_solution` is **null for Cloud Security findings** (0% populated) | Enrich via NVD API for CVE-based findings |
+
+The working filter payload — discovered empirically:
+
+```json
+{
+  "query": {"mode": "simple", "text": ""},
+  "filters": [
+    {"property": "asset_id", "operator": "=", "value": ["uuid1", "uuid2", ...]}
+  ]
+}
 ```
 
 ---
 
-## 2. Tenable One Inventory API -- Single Source of Truth
+## 3. Tag Taxonomy & Filtering Strategy
 
-### Why One Source Is Sufficient
+### 3.1 The taxonomy
 
-The Tenable One Inventory API (Exposure Management) is a **unified aggregation
-layer** that consolidates findings from every Tenable module into a single
-queryable dataset. There is no need to query individual product APIs separately.
-
-| Tenable Module               | What It Covers                                      |
-|------------------------------|-----------------------------------------------------|
-| Vulnerability Management     | Infrastructure CVEs, missing patches, host vulns    |
-| Cloud Security (CNAPP)       | Cloud misconfigs, container vulns, IaC findings     |
-| Web App Scanning (WAS)       | OWASP Top 10, web-specific vulnerabilities          |
-| Third-party connectors       | Orca, Prisma Cloud, etc. via Tenable integrations   |
-
-Every finding in the Inventory carries a `source` field indicating its origin
-module, so downstream consumers can distinguish between infrastructure vulns,
-cloud misconfigs, and web findings without needing separate API calls.
-
-### Two Retrieval Modes
-
-The middleware supports two modes, configurable via `tenable.retrieval_mode`:
-
-**Mode 1: Synchronous Search** (default)
-
-- Endpoint: `POST /api/v1/t1/inventory/findings/search`
-- Paginated with `offset` + `limit` (up to 10,000 per page)
-- Immediate results -- no job queue
-- Best for datasets under approximately 50,000 findings
-- Supports `extra_properties` to include VPR, ACR, AES, EPSS, CVE, solution, etc.
-
-**Mode 2: Async Export**
-
-- Endpoint: `POST /api/v1/t1/inventory/export/findings`
-- Queues an export job, returns an `export_id`
-- Poll `GET /api/v1/export/{export_id}/status` until FINISHED
-- Download JSON chunks via `GET /api/v1/export/{export_id}/download/{chunk_id}`
-- Designed for large datasets (50k+ findings)
-- Configurable poll interval (default: 10s) and max wait (default: 600s)
-
-The `TenableClient.fetch_findings()` method automatically dispatches to the
-correct mode based on configuration. Both modes return the same normalised
-finding structure.
-
-### Authentication
-
-API keys are passed via the `X-ApiKeys` header:
+Because the Inventory API only returns flat tag strings (no category context),
+the category is encoded into the tag name:
 
 ```
-X-ApiKeys: accessKey={access_key};secretKey={secret_key}
+<Category>-<Value>
 ```
 
-Credentials are sourced from environment variables (`TENABLE_ACCESS_KEY`,
-`TENABLE_SECRET_KEY`), never stored in config files.
+- Both parts use **PascalCase**.
+- The hyphen is the separator.
+- **Categories must be single-word** so the parser can split on the first hyphen unambiguously.
+- The first hyphen separates category from value; subsequent hyphens are part of the value.
 
-### Retry and Error Handling
+Approved categories: `Portfolio`, `Service`, `Environment`, `Sensitivity`,
+`Criticality`, `Owner`, `Region`, `Compliance`, `Application`.
 
-- Automatic retry on 429 (rate limit) with exponential backoff via `tenacity`
-- Up to 3 retries per request, backoff multiplier of 2, min 4s, max 60s
-- Distinct exceptions: `TenableAPIError`, `TenableRateLimitError`, `TenableExportTimeoutError`
-- 401 and 403 errors raise immediately (no retry)
-
----
-
-## 3. Reconciliation Engine
-
-The reconciliation engine is the core state management component. It compares
-the current pipeline run's staged findings against the stored findings database
-to determine what changed.
-
-### State Transition Model
+Examples:
 
 ```
-                          +------------------+
-     New finding          |                  |         Tenable state = Fixed
-    in staging   -------->|      OPEN        |------------------------+
-    (not in DB)           |                  |                        |
-                          +--------+---------+                        |
-                                   |                                  |
-                                   | not in staging,                  |
-                                   | last_seen > threshold            |
-                                   v                                  v
-                          +------------------+            +------------------+
-                          |                  |            |                  |
-                          |     STALE        |            |   REMEDIATED     |
-                          |                  |            |                  |
-                          +------------------+            +--------+---------+
-                                                                   |
-                                                                   | Tenable state =
-                                                                   | Active/Resurfaced
-                                                                   v
-                                                          +------------------+
-                                                          |  OPEN            |
-                                                          |  (is_recurrence  |
-                                                          |   = true)        |
-                                                          +------------------+
+Portfolio-Business-Growth        -> category=Portfolio, value=Business-Growth
+Service-Payment-Api              -> category=Service, value=Payment-Api
+Environment-Prod                 -> category=Environment, value=Prod
+Criticality-Critical             -> category=Criticality, value=Critical
+Owner-Team-Payments              -> category=Owner, value=Team-Payments
 ```
 
-### Five Reconciliation Paths
+Full reference: `tag_taxonomy.txt` at the repo root.
 
-| Path         | Condition                                                         | Action                                                        | Jira Queue   |
-|--------------|-------------------------------------------------------------------|---------------------------------------------------------------|--------------|
-| **NEW**      | Finding in staging, not in `findings` table                       | INSERT into findings, score, calculate SLA                    | CREATE       |
-| **STILL OPEN** | In both staging and findings, Tenable state = Active           | UPDATE scores, last_seen, enrichment; re-evaluate SLA         | UPDATE (if SLA status changed) |
-| **REMEDIATED** | In both, Tenable state = Fixed                                 | Set state=REMEDIATED, record remediated_at, compute time_to_fix | CLOSE      |
-| **RECURRENCE** | Previously REMEDIATED, now Active/Resurfaced in staging        | Reopen, set is_recurrence=true, increment recurrence_count, reset SLA | REOPEN |
-| **STALE**    | In findings as OPEN, NOT in staging, last_seen > stale_threshold | Set state=STALE (not auto-closed -- requires investigation)   | None         |
+### 3.2 Why this matters for filtering
 
-### Why Reconciliation Instead of Jira Push Notifications
+In the Tenable UI you can create tags with separate `Category` and `Value`
+fields, but the **API returns only the Value field** when you request
+`tag_names`. So `Category="Environment", Value="Prod"` appears in the API
+as just `"Prod"`.
 
-Tenable does not provide webhooks or push notifications for state changes.
-The middleware must poll on a schedule and compare the full dataset to detect
-remediations. This "pull and reconcile" pattern is the only reliable way to
-detect that a finding has been fixed without requiring manual intervention.
+**To make the API value carry the category**, you must put the full taxonomic
+name in Tenable's Value field, e.g. set `Value="Environment-Prod"` directly.
+The category field then becomes purely UI-grouping metadata.
 
-### Reconciliation Algorithm (Simplified)
+### 3.3 The filtering strategy
 
+Because `findings/search` ignores tag filters, the middleware uses a
+**two-stage approach** when a `tag_filter` is configured:
+
+**Stage 1 — pre-flight on assets/search (advanced query)**
+
+```http
+POST /api/v1/t1/inventory/assets/search
+?extra_properties=asset_id,asset_name,tag_names
+{
+  "query": {
+    "mode": "advanced",
+    "text": "Assets HAS tag_names = \"Portfolio-Business-Growth\""
+  }
+}
 ```
-1. Load all staged findings (current run) into lookup by tenable_finding_id
-2. For each OPEN/STALE finding in DB:
-   a. If found in staging AND state=Fixed      -> REMEDIATED
-   b. If found in staging AND state=Active      -> STILL OPEN (update)
-   c. If NOT in staging AND stale threshold hit -> STALE
-3. For each REMEDIATED finding in DB:
-   a. If found in staging AND state=Active/Resurfaced -> RECURRENCE
-4. For each staged finding NOT already processed -> NEW
-5. Flush Jira action queue entries
+
+This genuinely filters. Paginated. Returns each tagged asset with **all** of
+its tag_names (not just the filter tag), so we capture the full enrichment
+context in one pass.
+
+Result: `dict[asset_id → list[tag_names]]`.
+
+**Stage 2 — batched findings/search (structured filter)**
+
+For each batch of 500 asset_ids, call:
+
+```http
+POST /api/v1/t1/inventory/findings/search?extra_properties=...
+{
+  "query": {"mode": "simple", "text": ""},
+  "filters": [
+    {"property": "asset_id", "operator": "=", "value": ["uuid1", ..., "uuid500"]}
+  ]
+}
 ```
+
+This filters server-side. Paginated. We never pull findings that aren't on
+tagged assets.
+
+Performance: 33,000 tagged assets / 500 per batch = 66 batches. ~5 minutes
+total vs ~20 minutes if we pulled all 4.4M findings and filtered client-side.
+
+### 3.4 Validation & warnings
+
+Any tag that doesn't match the taxonomy (no hyphen, or unknown category) is
+logged as a `tag_invalid_format` warning by the enrichment engine and
+otherwise ignored. The pipeline doesn't fail on bad tags; it just doesn't
+enrich.
 
 ---
 
 ## 4. Pipeline Flow
 
-The pipeline runs as a sequential process. In Phase 0, a local runner
-(`src/pipeline.py`) executes all steps. In Phase 2, AWS Step Functions
-will orchestrate Lambda invocations for each step.
+### 4.1 Steps
 
 ```
-Step 1: Enrichment Sync
-  - Load business context from CSV into enrichment_mappings table
-  - (Phase 1: also sync from AWS Tags API)
-
-Step 2: Tenable Ingestion
-  - Fetch all findings via TenableClient.fetch_findings()
-  - Normalise each finding to canonical schema
-  - Bulk insert into findings_staging table
-
-Step 2b: Apply Enrichment
-  - Match staged findings against enrichment_mappings (by asset_id, then asset_name)
-  - Write enrichment data into staging records via tenable_tags._enrichment JSON
-
-Step 3: Scoring and Reconciliation
-  - Run reconciliation engine (compare staging vs stored findings)
-  - Score each new/updated finding via scoring engine
-  - Calculate SLA due dates and status
-  - Populate jira_action_queue with CREATE/UPDATE/CLOSE/REOPEN actions
-
-Step 4: Jira Sync (Phase 1-2)
-  - Process jira_action_queue entries
-  - Create/update/close/reopen Jira tickets
-  - Log all API calls to jira_sync_log
-  - In Phase 0: actions are logged but not executed
-
-Step 5: Pipeline Completion
-  - Clean up staging table for this run
-  - Update pipeline_runs record with statistics
-  - Print summary
+[CLI / scheduler]
+      |
+      v
+  Setup or resume a PipelineRun row
+      |
+      v
+  Step 1 — CSV enrichment sync (optional, file-based overrides)
+      |
+      v
+  Step 2 — Tenable ingestion
+      |
+      |  if tag_filter is set:
+      |       Stage 2a — assets/search advanced query
+      |          -> asset_ids + asset_tags_map persisted on the run
+      |       Stage 2b — findings/search batched by asset_id
+      |          -> findings_staging committed per page, checkpoint saved
+      |
+      |  else (legacy path, no tag):
+      |       findings/search streaming all
+      |
+      v
+  Step 3a — Apply asset-tag enrichment (portfolio/criticality/etc.)
+  Step 3b — Apply CSV overrides on top
+  Step 3c — NVD enrichment: fetch description/CWE/references for new CVEs
+      |
+      v
+  Step 4 — Scoring + reconciliation
+      |       Risk formula applied to every finding
+      |       State transitions detected (NEW / STILL OPEN / REMEDIATED / etc.)
+      |       Jira action queue populated
+      |
+      v
+  Step 5 — Cleanup: clear staging rows for this run, mark run SUCCESS
+      |
+      v
+  [Done — CSV reports can now query the findings table]
 ```
 
-### Pipeline Run Record
+### 4.2 Streaming + checkpoint resume
 
-Every execution creates a `PipelineRun` record tracking:
-- Status (RUNNING / SUCCESS / FAILED)
-- Trigger (manual / scheduled)
-- Counts: fetched, new, updated, remediated, recurred, stale
-- Jira ticket counts: created, updated, closed
-- Error list (if any)
-- Timing (started_at, completed_at)
+Each page committed to the DB also advances a checkpoint on `pipeline_runs`:
+
+- `last_offset` (for the legacy non-batched path)
+- `last_batch_idx` (for the tagged path)
+- `pages_completed`, `findings_fetched`, `total_findings_expected`
+
+If the run is interrupted (network failure, screen sleep, ctrl-C), the next
+run with `--resume` finds the most recent `RUNNING`/`PARTIAL_FAILURE`/`FAILED`
+record, verifies its tag_filter matches the current request (otherwise starts
+fresh), and resumes from the saved checkpoint.
+
+The pre-flight asset list (`asset_ids_for_run`) is persisted on the run row so
+we don't re-fetch tagged assets on resume.
+
+### 4.3 NVD enrichment
+
+After ingestion + enrichment, the pipeline collects every distinct CVE from
+the run's staging rows, checks the `cve_details` cache for entries older than
+`ttl_days` (default 60), and fetches the missing ones from NVD.
+
+Rate-limited per NVD docs:
+- without API key: 5 requests / 30 seconds
+- with API key: 50 requests / 30 seconds (set `NVD_API_KEY` in `.env`)
+
+Errors are non-fatal; missing CVEs just don't get enriched on this run.
 
 ---
 
-## 5. Data Model
+## 5. Reconciliation Engine
 
-All tables use UUID primary keys and are managed via SQLAlchemy ORM with
-Alembic migrations. PostgreSQL 16 is the only supported database.
+Operates on `findings_staging` (this run) joined with `findings` (everything
+the middleware has ever seen) on `tenable_finding_id`.
 
-### 5.1 Finding
+### 5.1 Five state transitions
 
-The core finding table stores scored, enriched vulnerability and misconfiguration
-records.
+| Transition | Condition | Action |
+|---|---|---|
+| NEW | finding exists in staging, not in findings table | INSERT, score, calculate SLA, queue Jira CREATE |
+| STILL OPEN | both exist, Tenable state = ACTIVE | UPDATE last_seen, re-score, re-calculate SLA |
+| REMEDIATED | exists in DB as OPEN, Tenable state = FIXED | mark `state = REMEDIATED`, compute `time_to_fix_days`, queue Jira CLOSE |
+| RECURRENCE | exists as REMEDIATED, Tenable state = ACTIVE/RESURFACED | reopen, increment `recurrence_count`, queue Jira REOPEN |
+| STALE | exists in DB as OPEN but **not** in staging, `last_seen` > stale_threshold_days | mark `state = STALE` for human review (does NOT auto-close ticket) |
 
-| Column                 | Type          | Description                                           |
-|------------------------|---------------|-------------------------------------------------------|
-| id                     | UUID (PK)     | Internal identifier                                   |
-| tenable_finding_id     | VARCHAR(255)  | Tenable's finding ID (unique, indexed)                |
-| tenable_asset_id       | VARCHAR(255)  | Tenable's asset UUID                                  |
-| title                  | VARCHAR(1000) | Finding title / plugin name                           |
-| cve_id                 | VARCHAR(50)   | CVE identifier (nullable)                             |
-| severity               | VARCHAR(20)   | Tenable severity: Critical/High/Medium/Low/Info       |
-| vpr_score              | FLOAT         | Vulnerability Priority Rating (0.1-10.0)              |
-| acr                    | INTEGER       | Asset Criticality Rating (1-10)                       |
-| aes                    | INTEGER       | Asset Exposure Score (0-1000)                         |
-| epss_score             | FLOAT         | Exploit Prediction Scoring System (0-100)             |
-| exploit_maturity       | VARCHAR(50)   | Exploit maturity level                                |
-| cvssv3_score           | FLOAT         | CVSSv3 base score                                     |
-| source                 | VARCHAR(50)   | Origin module: Nessus / CloudSecurity / WAS           |
-| plugin_id              | VARCHAR(50)   | Tenable plugin identifier                             |
-| solution               | TEXT          | Recommended remediation                               |
-| asset_name             | VARCHAR(500)  | Asset hostname or identifier                          |
-| asset_type             | VARCHAR(100)  | Asset type (host, cloud resource, container, etc.)    |
-| asset_ip               | VARCHAR(50)   | IP address                                            |
-| asset_hostname         | VARCHAR(500)  | FQDN                                                 |
-| portfolio              | VARCHAR(255)  | Business portfolio (from enrichment)                  |
-| service                | VARCHAR(255)  | Service name (from enrichment)                        |
-| environment            | VARCHAR(50)   | Environment: prod / staging / dev                     |
-| data_sensitivity       | VARCHAR(50)   | Data sensitivity classification                       |
-| asset_criticality      | VARCHAR(20)   | CRITICAL / HIGH / MEDIUM / LOW                        |
-| asset_criticality_score| FLOAT         | Normalised criticality (0.25-1.0)                     |
-| service_owner          | VARCHAR(255)  | Individual owner                                      |
-| service_owner_team     | VARCHAR(255)  | Owning team                                           |
-| risk_model             | VARCHAR(20)   | "custom" or "lumin_ces"                               |
-| risk_score             | FLOAT         | Computed risk score (0.0-1.0)                         |
-| risk_rating            | VARCHAR(20)   | CRITICAL / HIGH / MEDIUM / LOW                        |
-| sla_days               | INTEGER       | SLA window in days                                    |
-| sla_due_date           | DATE          | first_seen + sla_days                                 |
-| sla_status             | VARCHAR(20)   | WITHIN_SLA / APPROACHING / BREACHED                   |
-| state                  | VARCHAR(20)   | OPEN / REMEDIATED / STALE                             |
-| tenable_state          | VARCHAR(20)   | Active / Fixed / Resurfaced / New                     |
-| first_seen             | DATETIME      | When Tenable first detected the finding               |
-| last_seen              | DATETIME      | Most recent Tenable observation                       |
-| remediated_at          | DATETIME      | When state changed to REMEDIATED                      |
-| time_to_fix_days       | INTEGER       | Days between first_seen and remediated_at             |
-| is_recurrence          | BOOLEAN       | Whether this finding has recurred                     |
-| recurrence_count       | INTEGER       | Number of times the finding recurred                  |
-| jira_ticket_key        | VARCHAR(50)   | Linked Jira ticket (e.g., VULN-123)                   |
-| jira_ticket_status     | VARCHAR(50)   | Current Jira ticket status                            |
-| jira_created_at        | DATETIME      | When Jira ticket was created                          |
-| jira_closed_at         | DATETIME      | When Jira ticket was closed                           |
-| created_at             | DATETIME      | Row creation time                                     |
-| updated_at             | DATETIME      | Last modification time                                |
-| last_run_id            | UUID          | Pipeline run that last touched this record            |
+A REMEDIATED finding that is still FIXED in the API is skipped — no action.
 
-**Indexes**: state+risk_rating, sla_due_date+sla_status, portfolio+service,
-last_seen, jira_ticket_key.
+### 5.2 Why STALE != REMEDIATED
 
-### 5.2 FindingStaging
+A finding that disappears from the API can mean:
+- The asset was decommissioned (not a remediation)
+- The asset was untagged from the filter portfolio (not a remediation)
+- The vulnerability really is fixed (but Tenable hasn't re-scanned)
 
-Temporary table holding normalised findings from the current pipeline run.
-Schema mirrors Finding but includes `run_id` for isolation and `tenable_tags`
-(JSON) for carrying raw tag data and enrichment context through the pipeline.
-Cleared after each run completes.
-
-### 5.3 EnrichmentMapping
-
-Asset-to-business context mappings. Keyed by `(asset_identifier, identifier_type)`
-with a unique constraint. Sources: `csv`, `aws_tags`, `manual`.
-
-Fields: portfolio, service, environment, data_sensitivity, asset_criticality,
-asset_criticality_score, service_owner, service_owner_team.
-
-### 5.4 EnrichmentOverride
-
-Manual per-field overrides uploaded via CSV. Allows overriding a single field
-for a specific asset without replacing the entire enrichment mapping.
-
-### 5.5 JiraActionQueue
-
-Queue of pending Jira operations produced by reconciliation. Each entry has:
-- `action`: CREATE / UPDATE / CLOSE / REOPEN
-- `payload`: JSON with action-specific data (title, risk_rating, reason, etc.)
-- `status`: PENDING / DONE / FAILED
-- Linked to `run_id` and `finding_id`
-
-### 5.6 JiraSyncLog
-
-Audit trail of all Jira API calls. Records request payload, response status,
-response body, and success flag. Used for debugging and compliance.
-
-### 5.7 PipelineRun
-
-Pipeline execution metadata. Tracks status, trigger source, all reconciliation
-counts, Jira ticket counts, errors, and timing.
-
-### 5.8 RiskException
-
-Risk acceptance workflow. Tracks exception requests with justification,
-compensating controls, expiry date, and approval decision chain
-(PENDING / APPROVED / REJECTED).
+We never auto-close Jira tickets on disappearance. Only an explicit Tenable
+`FIXED` state triggers closure.
 
 ---
 
-## 6. Scoring Engine
+## 6. Data Model
 
-The scoring engine supports two configurable models. The active model is set
-via `scoring.active_model` in `config/scoring.yaml`.
+PostgreSQL 16. All tables in the `public` schema. Migrations under `db/migrations/`.
 
-### 6.1 Custom Model (default)
+### 6.1 Tables
 
-Formula:
+| Table | Purpose |
+|---|---|
+| `findings` | Canonical scored finding records. Primary key is internal `id`; `tenable_finding_id` is UNIQUE. |
+| `findings_staging` | Per-run staging. Cleared at end of pipeline. |
+| `enrichment_mappings` | CSV-loaded asset-to-business-context overrides. |
+| `enrichment_overrides` | Granular field-level overrides (rarely used). |
+| `cve_details` | NVD-enriched per-CVE data (PK: `cve_id`). LEFT-JOINed by reports. |
+| `jira_action_queue` | Pending CREATE/UPDATE/CLOSE/REOPEN actions (Phase 2). |
+| `jira_sync_log` | Audit log of Jira API calls (Phase 2). |
+| `pipeline_runs` | Run metadata + checkpoint + statistics. |
+| `risk_exceptions` | Risk-acceptance requests (Phase 2). |
+
+### 6.2 Key columns on `findings`
+
+```text
+identity:           id, tenable_finding_id (UNIQUE), tenable_asset_id
+
+source data:        title, cve_id, severity, vpr_score, cvssv3_score,
+                    source (sensor_type), plugin_id, solution
+
+enrichment:         portfolio, service, environment, data_sensitivity,
+                    asset_criticality, asset_criticality_score,
+                    service_owner, service_owner_team
+
+scoring (output):   risk_model, risk_score, risk_rating
+SLA:                sla_days, sla_due_date, sla_status
+
+state:              state (OPEN/REMEDIATED/STALE/RISK_ACCEPTED),
+                    tenable_state (ACTIVE/FIXED/RESURFACED/NEW),
+                    first_seen, last_seen, remediated_at,
+                    time_to_fix_days, is_recurrence, recurrence_count
+
+Jira:               jira_ticket_key, jira_ticket_status,
+                    jira_created_at, jira_closed_at
+
+metadata:           created_at, updated_at, last_run_id
+```
+
+### 6.3 Key columns on `pipeline_runs`
+
+```text
+identity:           id, started_at, completed_at, status, trigger
+
+run statistics:     findings_fetched, findings_new, findings_updated,
+                    findings_remediated, findings_recurred, findings_stale,
+                    jira_tickets_*
+
+checkpoint:         last_offset, pages_completed,
+                    total_findings_expected, tag_filter
+
+batched checkpoint: asset_ids_for_run (JSON: {ids: [...], tags: {...}}),
+                    last_batch_idx, total_batches
+
+errors:             errors (JSON list)
+```
+
+### 6.4 Key columns on `cve_details`
+
+```text
+cve_id (PK)
+description (text)
+cvss_v3_score, cvss_v3_severity
+cwe_id, cwe_name
+published_at
+references (JSON: [{url, source, tags}])
+source ('nvd')
+last_fetched_at
+```
+
+---
+
+## 7. Scoring Engine
+
+### 7.1 The formula
 
 ```
-risk_score = (vpr_normalised * vpr_weight) + (acs * acs_weight)
+risk_score = (vpr_normalised × vpr_weight) + (acs × acs_weight)
 ```
 
 Where:
-- `vpr_normalised` = VPR score / 10.0 (clamped to 0.0-1.0)
-- `acs` = asset criticality score (0.25-1.0, from enrichment)
-- Default weights: VPR 50%, ACS 50%
+- `vpr_normalised` = `vpr_score / 10.0` (Tenable VPR is 0.0–10.0; we map to 0.0–1.0)
+- `acs` = `asset_criticality_score` (0.25–1.0; sourced from the `Criticality-*` tag)
+- `vpr_weight` + `acs_weight` configurable, default 0.5 each
 
-**VPR Fallback**: When VPR is unavailable, severity maps to a fallback:
+Risk rating mapping (configurable thresholds):
 
-| Severity | Fallback VPR |
-|----------|-------------|
-| Critical | 9.0         |
-| High     | 7.0         |
-| Medium   | 5.0         |
-| Low      | 2.0         |
-| Info     | 0.5         |
+| risk_score >= | risk_rating |
+|---|---|
+| 0.75 | CRITICAL |
+| 0.50 | HIGH |
+| 0.30 | MEDIUM |
+| else | LOW |
 
-**ACS Default**: If no enrichment data exists, ACS defaults to 0.25 (LOW).
+### 7.2 Two models supported
 
-**Rating Thresholds** (configurable):
+| Model | Description |
+|---|---|
+| `custom` | Default. The weighted VPR+ACS formula above. |
+| `lumin_ces` | Uses Tenable's native AES (Asset Exposure Score) if present, falls back to approximation `(VPR/10 × 500) + (ACR/10 × 500)`. |
 
-| Risk Rating | Score Threshold |
-|-------------|-----------------|
-| CRITICAL    | >= 0.75         |
-| HIGH        | >= 0.50         |
-| MEDIUM      | >= 0.30         |
-| LOW         | < 0.30          |
+Switch via `scoring.active_model` in `config/scoring.yaml`.
 
-### 6.2 Lumin CES Model
-
-Uses Tenable's native Asset Exposure Score (AES) when available, which
-represents Tenable's own CES = f(VPR, ACR) calculation.
-
-If AES is not available, approximates CES:
-
-```
-approximate_ces = ((vpr / 10) * 500) + ((acr / 10) * 500)
-```
-
-CES is on a 0-1000 scale, normalised to 0.0-1.0 for consistency.
-
-**CES Rating Thresholds** (configurable):
-
-| Risk Rating | CES Threshold |
-|-------------|---------------|
-| CRITICAL    | >= 800        |
-| HIGH        | >= 600        |
-| MEDIUM      | >= 400        |
-| LOW         | < 400         |
-
-### 6.3 Scoring Dispatch
-
-The `score_finding()` function in `src/scoring/engine.py` reads the active
-model from config and delegates to the appropriate model. Both models return
-a `ScoringResult` dataclass with `risk_score`, `risk_rating`, and `risk_model`.
-
----
-
-## 7. SLA Policy
-
-A **unified SLA policy** applies to all finding types -- no split between
-vulnerabilities and misconfigurations. SLA is determined by risk rating.
-
-| Risk Rating | SLA (calendar days) |
-|-------------|---------------------|
-| CRITICAL    | 10                  |
-| HIGH        | 30                  |
-| MEDIUM      | 45                  |
-| LOW         | 90                  |
-
-### SLA Status Determination
-
-```
-due_date = first_seen + sla_days
-
-if today > due_date:              BREACHED
-elif days_remaining <= 5:         APPROACHING
-else:                             WITHIN_SLA
-```
-
-- `approaching_warning_days` is configurable (default: 5)
-- `use_business_days` is supported but defaults to false
-- SLA is recalculated on each pipeline run
-- On recurrence, SLA resets from the new first_seen date
-
----
-
-## 8. Enrichment
-
-Enrichment adds business context to findings so that risk scoring accounts for
-asset criticality and tickets are routed to the correct service teams.
-
-### Enrichment Fields
-
-| Field                  | Purpose                                |
-|------------------------|----------------------------------------|
-| portfolio              | Business portfolio / department        |
-| service                | Service or application name            |
-| environment            | prod / staging / dev                   |
-| data_sensitivity       | PII / PHI / financial / public         |
-| asset_criticality      | CRITICAL / HIGH / MEDIUM / LOW         |
-| asset_criticality_score| Normalised score (0.25-1.0)            |
-| service_owner          | Individual responsible                 |
-| service_owner_team     | Team responsible                       |
-
-### Criticality Score Mapping
-
-| Criticality | Score |
-|-------------|-------|
-| CRITICAL    | 1.0   |
-| HIGH        | 0.75  |
-| MEDIUM      | 0.50  |
-| LOW         | 0.25  |
-
-### Enrichment Sources (by priority)
-
-1. **EnrichmentOverride** -- manual per-field overrides (highest priority)
-2. **EnrichmentMapping (CSV)** -- bulk mappings loaded from CSV files
-3. **EnrichmentMapping (AWS Tags)** -- auto-synced from AWS resource tags (Phase 1)
-4. **Tenable Tags** -- fallback if no mapping exists
-
-### Matching Logic
-
-Staged findings are matched against enrichment mappings by:
-1. `tenable_asset_id` (exact match, identifier_type = "asset_id")
-2. `asset_name` (case-insensitive, identifier_type = "asset_name")
-
-Enrichment data is attached to staging records via the `tenable_tags._enrichment`
-JSON field, then propagated to the `findings` table during reconciliation.
-
----
-
-## 9. Jira Ticketing
-
-### Phased Rollout Control
-
-Jira ticket creation is gated by a rollout configuration that controls which
-findings get tickets. This prevents overwhelming service teams during initial
-deployment.
-
-**Rollout Phases** (configured in `config/rollout.yaml`):
-
-| Phase           | Severity Filter          | Team Filter          | Max Tickets/Run |
-|-----------------|--------------------------|----------------------|-----------------|
-| pilot           | CRITICAL, HIGH           | team-platform, team-api | 50           |
-| critical_high   | CRITICAL, HIGH           | (all teams)          | 100             |
-| medium          | CRITICAL, HIGH, MEDIUM   | (all teams)          | 200             |
-| full            | ALL                      | (all teams)          | 500             |
-
-### Jira Configuration
-
-- Default project: configurable (e.g., "VULN")
-- Portfolio-to-project mapping for routing tickets to team-specific Jira projects
-- Priority mapping: risk rating to Jira priority (CRITICAL -> Highest, etc.)
-- Labels: all tickets tagged with "vm-middleware"
-- Close transition: "Done"
-- Reopen transition: "To Do"
-
-### Action Queue Pattern
-
-Reconciliation produces Jira actions (CREATE / UPDATE / CLOSE / REOPEN) in the
-`jira_action_queue` table. A separate Jira sync step processes the queue,
-executes API calls, and logs results to `jira_sync_log`. This decouples
-reconciliation from Jira availability.
-
----
-
-## 10. Project Structure
-
-```
-vm-middleware/
-|-- pyproject.toml              # Project metadata and dependencies
-|-- Makefile                    # Developer shortcuts
-|-- docker-compose.yaml         # Local PostgreSQL 16
-|-- .env.example                # Environment variable template
-|
-|-- config/
-|   |-- scoring.yaml            # Scoring model selection and thresholds
-|   |-- sla_policy.yaml         # SLA days per risk rating
-|   |-- rollout.yaml            # Jira rollout phase configuration
-|   |-- schedule.yaml           # Pipeline cron schedule
-|   |-- tenable.yaml            # Tenable API settings and retrieval mode
-|   |-- jira.yaml               # Jira project, priority, and transition config
-|
-|-- src/
-|   |-- common/
-|   |   |-- config.py           # YAML loader + Pydantic settings models
-|   |   |-- db.py               # SQLAlchemy engine, session factory, Base
-|   |   |-- logging.py          # Structured JSON logging (structlog)
-|   |   |-- models.py           # All SQLAlchemy ORM models
-|   |
-|   |-- ingestion/
-|   |   |-- tenable_client.py   # HTTP client for Tenable One Inventory API
-|   |   |-- tenable_ingestion.py# Normalisation and staging orchestrator
-|   |   |-- enrichment.py       # CSV loader and enrichment applicator
-|   |
-|   |-- scoring/
-|   |   |-- engine.py           # Scoring dispatcher (routes to active model)
-|   |   |-- custom_model.py     # Custom weighted model (VPR + ACS)
-|   |   |-- lumin_model.py      # Lumin CES model (AES-based)
-|   |   |-- sla.py              # SLA due date and status calculation
-|   |   |-- types.py            # ScoringResult dataclass
-|   |
-|   |-- reconciliation/
-|   |   |-- reconciler.py       # Core reconciliation engine
-|   |
-|   |-- integration/            # Jira client (Phase 1)
-|   |-- reporting/              # CSV report generation (Phase 2)
-|   |-- api/                    # FastAPI routers and schemas (Phase 2)
-|   |-- lambdas/                # AWS Lambda handlers (Phase 2)
-|   |-- pipeline.py             # Sequential pipeline runner
-|
-|-- db/
-|   |-- alembic.ini             # Alembic configuration
-|   |-- migrations/
-|       |-- env.py              # Alembic environment
-|       |-- versions/           # Migration scripts
-|
-|-- tests/
-|   |-- conftest.py             # Shared fixtures and test DB session
-|   |-- unit/
-|   |   |-- test_scoring.py     # Scoring model tests
-|   |   |-- test_sla.py         # SLA calculation tests
-|   |   |-- test_reconciliation.py # Reconciliation path tests
-|   |   |-- test_tenable_client.py # API client tests (mocked)
-|   |-- integration/            # Integration tests (Phase 1)
-|
-|-- scripts/
-|   |-- run_local.py            # Local pipeline entry point
-```
-
----
-
-## 11. Technology Stack
-
-| Component          | Technology                         | Purpose                              |
-|--------------------|------------------------------------|--------------------------------------|
-| Language           | Python 3.12+                       | Primary runtime                      |
-| ORM                | SQLAlchemy 2.0+                    | Database access and models           |
-| Migrations         | Alembic 1.13+                      | Schema versioning                    |
-| Database           | PostgreSQL 16                      | Persistent storage (no S3)           |
-| HTTP client        | httpx 0.27+                        | Tenable API communication            |
-| Retry logic        | tenacity 8.0+                      | Exponential backoff for API calls    |
-| Config validation  | Pydantic 2.0+ / pydantic-settings  | Typed config models                  |
-| Config format      | YAML                               | Human-readable configuration         |
-| Logging            | structlog 24.0+                    | Structured JSON logging              |
-| Testing            | pytest 8.0+ / respx / factory-boy  | Unit and integration tests           |
-| Linting            | ruff                               | Code quality and formatting          |
-| Containerisation   | Docker Compose                     | Local development database           |
-| API (Phase 2)      | FastAPI                            | REST API service                     |
-| Compute (Phase 2)  | AWS Lambda                         | Pipeline execution                   |
-| Service (Phase 2)  | ECS Fargate                        | API hosting                          |
-| Scheduling         | EventBridge (Phase 2)              | Cron-triggered pipeline runs         |
-
----
-
-## 12. Configuration Reference
-
-### Environment Variables
-
-| Variable             | Required | Default                          | Description                    |
-|----------------------|----------|----------------------------------|--------------------------------|
-| DATABASE_URL         | Yes      | postgresql://...localhost:5432   | PostgreSQL connection string   |
-| TENABLE_ACCESS_KEY   | Yes*     | (empty)                          | Tenable API access key         |
-| TENABLE_SECRET_KEY   | Yes*     | (empty)                          | Tenable API secret key         |
-| JIRA_API_TOKEN       | No       | (empty)                          | Jira API token (Phase 1+)      |
-| JIRA_USER_EMAIL      | No       | (empty)                          | Jira user email (Phase 1+)     |
-| CONFIG_DIR           | No       | config                           | Path to YAML config directory  |
-| LOG_LEVEL            | No       | INFO                             | Logging level                  |
-
-*Required for production; not needed when using `--mock` mode.
-
-### YAML Configuration Files
-
-**config/scoring.yaml**
+### 7.3 Criticality → ACS mapping (configurable)
 
 ```yaml
 scoring:
-  active_model: "custom"           # "custom" | "lumin_ces"
+  criticality_scores:
+    CRITICAL: 1.0
+    HIGH: 0.75
+    MEDIUM: 0.50
+    LOW: 0.25
+  default_criticality_score: 0.25   # used when asset has no Criticality tag
+```
+
+### 7.4 Worked example
+
+CVE on an asset tagged `Criticality-Critical`, VPR=9.6:
+
+```
+risk_score = (9.6/10 × 0.5) + (1.0 × 0.5) = 0.48 + 0.5 = 0.98  →  CRITICAL
+```
+
+Same CVE on an asset with no Criticality tag (ACS defaults to 0.25):
+
+```
+risk_score = (9.6/10 × 0.5) + (0.25 × 0.5) = 0.48 + 0.125 = 0.605  →  HIGH
+```
+
+The formula deliberately lets asset business value compress or amplify the
+raw VPR.
+
+---
+
+## 8. SLA Policy
+
+Single unified policy (no split between vulnerability types in current scope):
+
+```yaml
+sla:
+  critical: 10    # days
+  high: 30
+  medium: 45
+  low: 90
+  use_business_days: false
+  approaching_warning_days: 5
+```
+
+`sla_due_date` = `first_seen + sla_days`.
+`sla_status`:
+
+| Status | Condition |
+|---|---|
+| WITHIN_SLA | `due_date - today > approaching_warning_days` |
+| APPROACHING | `0 <= due_date - today <= approaching_warning_days` |
+| BREACHED | `due_date < today` |
+
+---
+
+## 9. Enrichment Sources
+
+Three sources, applied in priority order (last write wins):
+
+1. **Asset-tag enrichment** (primary) — parses each asset's full set of `tag_names` via the taxonomy parser. Populates portfolio / service / environment / data_sensitivity / asset_criticality / asset_criticality_score / service_owner_team.
+2. **CSV overrides** — `tests/fixtures/sample_enrichment.csv` or any CSV at `--enrichment` path. Manual corrections for assets where Tenable tags are wrong or missing.
+3. **AWS Tags sync** (planned, Phase 1) — pull AWS resource tags via the Tagging API for assets that aren't in Tenable yet.
+
+The asset-tag path is the workhorse: the pipeline already pulls all of each
+asset's tags during the pre-flight, so this enrichment is free.
+
+---
+
+## 10. NVD Enrichment
+
+Tenable's Inventory API returns `finding_solution = null` for 100% of Cloud
+Security findings (confirmed: 0 / 213,398 populated in test data). Without
+descriptions or remediation guidance, the CSV report would be useless for
+resolvers.
+
+The middleware addresses this with NVD enrichment.
+
+### 10.1 What it provides
+
+For each unique CVE in a pipeline run, fetch from NVD and cache in `cve_details`:
+
+| Field | Source | What it's for |
+|---|---|---|
+| description | NVD `cve.descriptions[lang=en].value` | Description column in the report — the official summary of the vulnerability |
+| cvss_v3_score / severity | NVD `cve.metrics.cvssMetricV31` | Cross-check against Tenable VPR |
+| cwe_id | NVD `cve.weaknesses[0].description[lang=en].value` | Weakness classification |
+| references | NVD `cve.references` | Vendor advisories — these contain the actual fix steps |
+
+### 10.2 Cache strategy
+
+- Keyed on `cve_id`.
+- `last_fetched_at` updated on each refresh.
+- Re-fetch only when older than `ttl_days` (default 60).
+- Cache survives pipeline runs; subsequent runs only fetch newly-seen CVEs.
+
+### 10.3 API key
+
+NVD rate-limits anonymous traffic to 5 requests / 30 seconds. With a free API
+key (`NVD_API_KEY` in `.env`) the limit rises to 50/30s. For an initial fetch
+of ~2,000 unique CVEs:
+
+- without key: ~3.5 hours
+- with key: ~20 minutes
+
+Subsequent runs only fetch new CVEs (typically a handful per day).
+
+### 10.4 Limitations
+
+- Cloud misconfigurations (no CVE) get no NVD enrichment. The Description column falls back to title + asset context.
+- NVD doesn't provide step-by-step "solution" text. The Solution column combines Tenable's `finding_solution` (if any) with vendor reference URLs (which contain the fix steps).
+
+---
+
+## 11. CSV Reporting
+
+Six reports, all generated by `scripts/generate_report.py`.
+
+| Report | Contents |
+|---|---|
+| `findings` | Full export with rich Description, Solution, References columns |
+| `risk-summary` | Counts grouped by risk_rating × portfolio × asset_criticality |
+| `sla-breaches` | All findings with `sla_status = BREACHED` |
+| `sla-approaching` | All findings with `sla_status = APPROACHING` |
+| `recurrence` | Findings that resurfaced after remediation |
+| `portfolio-summary` | Per-portfolio rollup: totals, severity breakdown, breaches, avg risk |
+
+### 11.1 Filtering
+
+All reports accept any combination of the same filters:
+
+```
+--portfolio --service --environment --asset-criticality
+--risk-rating --severity --state --sla-status --source
+```
+
+Repeatable flags become OR within a key, AND across keys.
+
+### 11.2 The Description column
+
+Built per finding from a LEFT JOIN with `cve_details`. Example output:
+
+```
+CVE-2023-2640  •  Severity: HIGH
+
+In Ubuntu kernels overlayfs ovl_copy_up_meta_inode_data skip_idmap check missed
+permission check that allowed user with CAP_SYS_ADMIN to escalate.
+
+CVSS v3: 7.8  •  VPR: 9.6  •  CWE: CWE-863  •  Source: CLOUD_SCAN
+
+Affected asset: 767397682808.dkr.ecr.eu-west-2.amazonaws.com/datahub/bf:build-987f...
+```
+
+### 11.3 The Solution column
+
+```
+[Tenable's solution if present, otherwise synthesised guidance]
+
+References:
+- https://ubuntu.com/security/CVE-2023-2640
+- https://nvd.nist.gov/vuln/CVE-2023-2640
+- ...
+```
+
+The references contain the actual vendor-specific fix steps — that's where
+resolvers click through for the "how".
+
+---
+
+## 12. Jira Ticketing (planned)
+
+In Phase 0+ scope the reconciliation engine already produces a `jira_action_queue`
+(CREATE / UPDATE / CLOSE / REOPEN actions). The actual Jira API integration
+is Phase 2.
+
+### 12.1 Design
+
+| Action | Trigger | Effect |
+|---|---|---|
+| CREATE | NEW finding above severity threshold AND in a piloted team | Create Jira issue, store key on the finding |
+| UPDATE | STILL OPEN finding with risk_score change > threshold | Add comment with new score |
+| CLOSE | finding becomes REMEDIATED | Transition Jira issue to Done, comment with time-to-fix |
+| REOPEN | finding becomes RECURRENCE | Reopen Jira issue, comment with recurrence count |
+
+### 12.2 Phased rollout controller
+
+`config/rollout.yaml` defines which severities + teams currently receive
+tickets. Defaults to a pilot:
+
+```yaml
+rollout:
+  phase: "pilot"
+  phases:
+    pilot: { severity_filter: [CRITICAL, HIGH], team_filter: [team-platform], max_tickets_per_run: 50 }
+    critical_high: { severity_filter: [CRITICAL, HIGH], team_filter: [], max_tickets_per_run: 100 }
+    medium: { severity_filter: [CRITICAL, HIGH, MEDIUM], ... }
+    full: { severity_filter: [CRITICAL, HIGH, MEDIUM, LOW], ... }
+```
+
+This prevents flooding teams on day one. Phase changes are config-only.
+
+---
+
+## 13. Project Structure
+
+```
+vm-middleware/
+├── ARCHITECTURE.md                  ← this file
+├── OVERVIEW.md                       ← 10-min top-level summary
+├── architecture_simple.md/.txt       ← one-page condensed version
+├── tag_taxonomy.txt                  ← the naming convention
+├── user_stories.txt                  ← phased user-story backlog
+├── pyproject.toml                    ← dependencies, build config
+├── Makefile                          ← install / db-up / db-migrate / test
+├── docker-compose.yaml               ← local PostgreSQL
+│
+├── config/
+│   ├── tenable.yaml                  ← endpoint, properties, retrieval mode, tag_filter
+│   ├── scoring.yaml                  ← formula weights, thresholds, criticality scores
+│   ├── sla_policy.yaml               ← SLA days per severity
+│   ├── rollout.yaml                  ← phased Jira rollout
+│   ├── schedule.yaml                 ← cron for scheduled runs (Phase 2)
+│   └── jira.yaml                     ← Jira config (Phase 2)
+│
+├── db/
+│   ├── alembic.ini
+│   └── migrations/versions/
+│       ├── 001_initial_schema.py
+│       ├── 002_pipeline_checkpoints.py
+│       ├── 003_widen_string_columns.py
+│       ├── 004_batch_checkpoint.py
+│       └── 005_cve_details.py
+│
+├── src/
+│   ├── common/
+│   │   ├── config.py                 ← Pydantic config loader (YAML + env vars)
+│   │   ├── db.py                     ← SQLAlchemy session, engine
+│   │   ├── models.py                 ← all ORM tables
+│   │   ├── logging.py                ← structlog setup
+│   │   └── tag_parser.py             ← parses Category-Value tags
+│   │
+│   ├── ingestion/
+│   │   ├── tenable_client.py         ← findings/search + batched asset_id filter
+│   │   ├── tenable_ingestion.py      ← normalise → staging
+│   │   ├── tagged_assets.py          ← pre-flight: assets/search advanced query
+│   │   ├── enrichment.py             ← asset-tag + CSV enrichment
+│   │   └── nvd_enrichment.py         ← NVD CVE fetch + cache
+│   │
+│   ├── reconciliation/
+│   │   └── reconciler.py             ← five-state machine
+│   │
+│   ├── scoring/
+│   │   ├── engine.py                 ← dispatcher
+│   │   ├── custom_model.py           ← VPR + ACS formula
+│   │   ├── lumin_model.py            ← Lumin CES model
+│   │   ├── sla.py                    ← SLA calculations
+│   │   └── types.py                  ← ScoringResult
+│   │
+│   ├── reporting/
+│   │   └── csv_reports.py            ← six report types
+│   │
+│   ├── pipeline.py                   ← orchestrator
+│   │
+│   └── lambdas/                      ← AWS Lambda entry points (Phase 2)
+│
+├── scripts/
+│   ├── run_local.py                  ← CLI: --tag --mode --severity --resume
+│   ├── generate_report.py            ← CLI: --report --filter --out
+│   ├── seed_enrichment.py            ← seed CSV mappings
+│   └── probe_*.py                    ← API discovery probes (one-off scripts)
+│
+└── tests/
+    ├── conftest.py
+    ├── fixtures/
+    │   ├── sample_tenable_findings.json
+    │   └── sample_enrichment.csv
+    └── unit/
+        ├── test_scoring.py
+        ├── test_sla.py
+        ├── test_reconciliation.py
+        ├── test_tag_parser.py
+        ├── test_tenable_client.py
+        ├── test_streaming.py
+        ├── test_asset_id_filter.py
+        ├── test_asset_tag_enrichment.py
+        ├── test_csv_reports.py
+        └── test_nvd_enrichment.py
+```
+
+116 unit tests passing.
+
+---
+
+## 14. Technology Stack
+
+| Layer | Choice |
+|---|---|
+| Language | Python 3.10+ |
+| HTTP client | `httpx` + `tenacity` (retries with exponential backoff) |
+| ORM | SQLAlchemy 2.0 |
+| Migrations | Alembic |
+| Config | Pydantic + YAML |
+| Logging | structlog (JSON) |
+| Database | PostgreSQL 16 |
+| Dev DB host | Docker Compose |
+| Tests | pytest |
+| CLI parsing | argparse |
+
+### What we deliberately avoided
+
+- S3 for raw data (PostgreSQL holds everything — simpler ops)
+- DynamoDB (relational queries win for reporting)
+- Async/await throughout (sync HTTP works fine at this scale)
+- Dashboards / UI (CSV exports meet immediate need)
+- Web framework like FastAPI (no public API in Phase 0)
+- Microservices (one orchestrator is plenty)
+- Redis (PostgreSQL handles caching via `cve_details`)
+
+---
+
+## 15. Configuration Reference
+
+Every config is YAML in `config/`. Anything sensitive (API keys) lives in
+`.env` and is read via Pydantic settings.
+
+### 15.1 `tenable.yaml`
+
+```yaml
+tenable:
+  base_url: "https://cloud.tenable.com"
+  findings_endpoint: "/api/v1/t1/inventory/findings/search"
+  retrieval_mode: "search"
+  extra_properties: "finding_vpr_score,finding_cvss3_base_score,finding_cves,finding_solution,finding_detection_id,asset_name,asset_class,sensor_type,first_observed_at,last_observed_at,last_updated,tag_names,tag_ids,ipv4_addresses,product"
+  page_size: 10000
+  request_timeout_seconds: 120
+  max_retries: 3
+  stale_threshold_days: 7
+  severity_filter: null         # not used currently
+  tag_filter: null              # set per-run via --tag CLI flag
+```
+
+### 15.2 `scoring.yaml`
+
+```yaml
+scoring:
+  active_model: "custom"
   custom:
     vpr_weight: 0.50
     acs_weight: 0.50
-    thresholds:
-      critical: 0.75
-      high: 0.50
-      medium: 0.30
+    thresholds: { critical: 0.75, high: 0.50, medium: 0.30 }
   lumin:
-    ces_thresholds:
-      critical: 800
-      high: 600
-      medium: 400
+    ces_thresholds: { critical: 800, high: 600, medium: 400 }
+  criticality_scores:
+    CRITICAL: 1.0
+    HIGH: 0.75
+    MEDIUM: 0.50
+    LOW: 0.25
+  default_criticality_score: 0.25
 ```
 
-**config/sla_policy.yaml**
+### 15.3 `sla_policy.yaml`
 
 ```yaml
 sla:
@@ -713,235 +847,70 @@ sla:
   approaching_warning_days: 5
 ```
 
-**config/tenable.yaml**
+### 15.4 `.env` (secrets)
 
-```yaml
-tenable:
-  base_url: "https://cloud.tenable.com"
-  retrieval_mode: "search"         # "search" | "export"
-  findings_endpoint: "/api/v1/t1/inventory/findings/search"
-  export_endpoint: "/api/v1/t1/inventory/export/findings"
-  page_size: 10000
-  extra_properties: "asset_name,vpr_score,cve,solution,acr,aes,..."
-  severity_filter: null
-  stale_threshold_days: 7
-  request_timeout_seconds: 120
-  max_retries: 3
-  export_poll_interval: 10
-  export_max_wait: 600
-```
-
-**config/rollout.yaml**
-
-```yaml
-rollout:
-  phase: "pilot"
-  phases:
-    pilot:
-      severity_filter: ["CRITICAL", "HIGH"]
-      team_filter: ["team-platform", "team-api"]
-      max_tickets_per_run: 50
-    critical_high:
-      severity_filter: ["CRITICAL", "HIGH"]
-      team_filter: []
-      max_tickets_per_run: 100
-    medium:
-      severity_filter: ["CRITICAL", "HIGH", "MEDIUM"]
-      team_filter: []
-      max_tickets_per_run: 200
-    full:
-      severity_filter: ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-      team_filter: []
-      max_tickets_per_run: 500
-```
-
-**config/schedule.yaml**
-
-```yaml
-schedule:
-  cron: "0 6 * * *"               # Daily at 06:00 UTC
-  timezone: "UTC"
-  enabled: true
-```
-
-**config/jira.yaml**
-
-```yaml
-jira:
-  base_url: "https://org.atlassian.net"
-  default_project: "VULN"
-  issue_type: "Task"
-  labels: ["vm-middleware"]
-  priority_mapping:
-    CRITICAL: "Highest"
-    HIGH: "High"
-    MEDIUM: "Medium"
-    LOW: "Low"
-  portfolio_project_mapping: {}
-  close_transition: "Done"
-  reopen_transition: "To Do"
+```bash
+DATABASE_URL=postgresql://vm_user:vm_local_pass@localhost:5435/vm_middleware
+TENABLE_ACCESS_KEY=...
+TENABLE_SECRET_KEY=...
+NVD_API_KEY=...                    # optional but strongly recommended
+# Phase 2:
+# JIRA_BASE_URL=...
+# JIRA_API_TOKEN=...
+# JIRA_USER_EMAIL=...
 ```
 
 ---
 
-## 13. Phase Alignment
+## 16. Phase Alignment
 
-### Phase 0 -- Foundation (CURRENT)
-
-Implemented and operational. Provides end-to-end pipeline execution locally.
-
-| Component                          | Status      |
-|------------------------------------|-------------|
-| Project scaffolding                | Complete    |
-| YAML configuration system          | Complete    |
-| PostgreSQL database + Alembic      | Complete    |
-| SQLAlchemy data models (9 tables)  | Complete    |
-| Structured logging (structlog)     | Complete    |
-| Tenable client (sync + async)      | Complete    |
-| Ingestion + normalisation          | Complete    |
-| Enrichment from CSV                | Complete    |
-| Custom scoring model               | Complete    |
-| Lumin CES scoring model            | Complete    |
-| SLA calculation                    | Complete    |
-| Reconciliation engine (5 paths)    | Complete    |
-| Jira action queue (no execution)   | Complete    |
-| Pipeline runner (sequential)       | Complete    |
-| Mock Tenable client                | Complete    |
-| Unit tests (scoring, SLA, recon)   | Complete    |
-
-### Phase 1 -- Integration
-
-| Component                          | Status      |
-|------------------------------------|-------------|
-| Jira API client + ticket creation  | Not started |
-| Jira sync step (process queue)     | Not started |
-| AWS Tags enrichment source         | Not started |
-| Rollout gate enforcement           | Not started |
-| Risk exception workflow            | Not started |
-| Integration tests                  | Not started |
-
-### Phase 2 -- Production Deployment
-
-| Component                          | Status      |
-|------------------------------------|-------------|
-| FastAPI API service                | Not started |
-| AWS Lambda handlers                | Not started |
-| ECS Fargate deployment             | Not started |
-| Step Functions orchestration       | Not started |
-| EventBridge cron scheduling        | Not started |
-| CSV report generation              | Not started |
-| RDS PostgreSQL setup               | Not started |
-| CloudWatch monitoring              | Not started |
-| E2E tests                          | Not started |
+| Phase | Status | Scope |
+|---|---|---|
+| Phase 0 — Foundation | Complete | Data model, ingestion, reconciliation, scoring, SLA, local dev |
+| Phase 0+ — Risk model | Complete | Tag taxonomy, asset-tag enrichment, NVD enrichment, CSV reports |
+| Phase 1 — Production baseline | Next | Lambda deployment, EventBridge schedule, AWS Secrets, validation runs |
+| Phase 2 — Jira + reporting v2 | Planned | Jira integration, phased rollout, exception management, dashboards (optional) |
+| Phase 3 — Expansion | Planned | Azure, ASM, executive reporting, SIEM/SOAR integration |
+| Phase 4 — Optimisation | Planned | Maturity reassessment, automation, BAU handover |
 
 ---
 
-## 14. Key Design Decisions
+## 17. Key Design Decisions
 
-### Single Tenable API source
+1. **Tenable Inventory API as the single source.** Avoids per-module integration. Confirmed it aggregates VM, Cloud Security, WAS, and container findings.
 
-The Tenable One Inventory API aggregates all modules. Querying individual
-product APIs (Nessus, Cloud Security, WAS) would require separate clients,
-different authentication, and manual deduplication. The Inventory API
-eliminates this complexity.
+2. **Tenable `id` field as the dedup key.** Stable across scans, unique across sources, persists through state changes — better than composite hashes.
 
-### Pull-and-reconcile over push notifications
+3. **Pull-and-reconcile rather than push.** Each run re-pulls and compares to stored state. No webhooks, no Jira state dependency.
 
-Tenable does not offer webhooks for finding state changes. The middleware
-polls on a schedule and reconciles the full dataset. This is reliable but
-means remediation detection has latency equal to the schedule interval.
+4. **Don't auto-close on missing findings.** Disappearance ≠ remediation. Only an explicit Tenable `FIXED` state closes a Jira ticket. Stale findings flag for human review.
 
-### Unified SLA policy
+5. **Tag taxonomy encodes the category in the value.** The Inventory API doesn't return Tenable's UI-only category field. `Category-Value` in PascalCase is the workaround; the parser splits on the first hyphen.
 
-No distinction between vulnerabilities and misconfigurations. Both types
-are scored identically and subject to the same SLA windows. This simplifies
-policy management and avoids debates about classification.
+6. **Two-stage filtering by tag.** `findings/search` ignores tag filters, but `assets/search` accepts advanced query. So we pre-fetch tagged asset_ids, then batch-filter findings server-side by asset_id.
 
-### PostgreSQL only -- no S3
+7. **Streaming pipeline with per-page commit + checkpoint.** Survives interruption. A 15-minute run is resumable from the last committed page.
 
-All data lives in PostgreSQL. Findings are rows, not files. This simplifies
-queries, eliminates ETL between storage tiers, and keeps the operational
-footprint small. The dataset size (typically under 500k findings) is well
-within PostgreSQL's comfort zone.
+8. **Configurable risk formula.** Criticality scores, weights, and thresholds are all in `scoring.yaml`. Switching from VPR+ACS to Lumin CES is a config flip.
 
-### Staging table pattern
+9. **NVD enrichment for descriptions/references.** Tenable returns no `finding_solution` for Cloud Security findings. NVD provides the gap fill, cached per CVE with configurable TTL.
 
-Findings are ingested into a temporary staging table, then compared against
-the persistent findings table during reconciliation. This ensures the
-reconciliation logic operates on a consistent snapshot and prevents partial
-updates if ingestion fails midway.
+10. **PostgreSQL-only storage.** No S3, no DynamoDB, no Redis. Relational queries dominate (reporting); a single database keeps ops simple.
 
-### Jira action queue (decoupled)
-
-Reconciliation produces Jira actions into a queue table rather than calling
-Jira directly. This decouples reconciliation from Jira availability, enables
-retry of failed Jira calls, and provides an audit trail. The queue can be
-drained by a separate step or Lambda.
-
-### Configurable scoring models
-
-Two models exist to support different organisational maturity levels. The
-custom model lets teams emphasise asset criticality (via enrichment). The
-Lumin model delegates scoring to Tenable's own CES calculation for
-organisations that trust Tenable's built-in risk assessment.
-
-### Hybrid deployment (Lambda + Fargate)
-
-Lambda handles the batch pipeline (scheduled, bursty, short-lived).
-ECS Fargate hosts the API service (long-running, always-on). This optimises
-cost: Lambda charges per invocation, Fargate provides consistent latency for
-API queries.
-
-### Phased Jira rollout
-
-Service teams are onboarded gradually. The pilot phase limits tickets to
-Critical/High findings for selected teams. Each subsequent phase widens the
-scope. This prevents alert fatigue and builds trust in the system before
-full-scale deployment.
+11. **CSV over dashboards.** Spec calls for CSV reports; we don't build a UI. Six report types accept the same filter set; downstream tools (Excel, PowerBI) handle visualisation.
 
 ---
 
-## 15. Non-Functional Requirements
+## 18. Non-Functional Requirements
 
-### Performance
-
-- Pipeline should complete within 15 minutes for up to 200,000 findings
-- Ingestion uses batch inserts (500 records per flush) to PostgreSQL
-- Tenable API pagination at 10,000 findings per page
-- Database indexes on all join and filter columns
-
-### Reliability
-
-- Automatic retry on Tenable API rate limits (429) with exponential backoff
-- Pipeline run tracking with RUNNING / SUCCESS / FAILED status
-- Staging table isolation prevents partial corruption of the findings table
-- Transaction-scoped database sessions with rollback on error
-
-### Security
-
-- API credentials in environment variables, never in config files or logs
-- Tenable keys via `X-ApiKeys` header (not URL parameters)
-- Jira API token via environment variable
-- No secrets in YAML configuration
-
-### Observability
-
-- Structured JSON logging via structlog with context (run_id, step name)
-- Pipeline run statistics persisted to database
-- Jira API call audit trail in jira_sync_log
-- Console renderer available in DEBUG mode for local development
-
-### Maintainability
-
-- All configuration externalised to YAML files with sensible defaults
-- Pydantic models validate configuration at startup
-- SQLAlchemy models provide type-safe database access
-- Alembic manages schema evolution
-- ruff enforces consistent code style (Python 3.12 target, 100-char lines)
-
-### Testability
-
-- MockTenableClient for local development without API credentials
-- conftest.py provides shared fixtures and in-memory database sessions
-- Unit tests cover scoring models, SLA calculation, and all reconciliation paths
-- Integration test directory prepared for Phase 1
+| Requirement | Current state |
+|---|---|
+| Local dev setup time | < 5 minutes (`make install && make db-up && make db-migrate`) |
+| Pipeline runtime (tagged, with NVD key) | ~10 minutes for ~33,000 assets / 163,000 findings on first run; ~5 minutes on subsequent runs (NVD cache warm) |
+| Resume safety | Per-page commits + run checkpoint; interruption costs at most one page (< 30 seconds of work) |
+| Test coverage | 116 unit tests; full reconciliation, scoring, SLA, enrichment, NVD, and reporting paths covered |
+| Reproducibility | Deterministic config + Docker DB → identical results across machines |
+| Auditability | Every API call logged via structlog (JSON); per-run statistics persisted in `pipeline_runs` |
+| Observability | structlog JSON output ready for ingestion into CloudWatch / Datadog / etc. |
+| Security | Secrets via `.env` (gitignored). No credentials in code or YAML config. |
+| Scale ceiling (current) | Tested at 4.4M total findings, 163K filtered; pre-flight asset cap ~33K; should handle 10x with no architectural change |
