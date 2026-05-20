@@ -138,7 +138,7 @@ def _fetch_one(client: httpx.Client, cve_id: str, api_key: str | None) -> dict |
 def enrich_unique_cves_for_run(
     session: Session,
     run_id,
-    ttl_days: int = 30,
+    ttl_days: int = 60,
     api_key: str | None = None,
 ) -> int:
     """Look at all staged findings for this run, find unique CVEs not yet
