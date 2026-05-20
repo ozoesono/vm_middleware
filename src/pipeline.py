@@ -18,6 +18,7 @@ from src.ingestion.enrichment import (
     apply_enrichment,
     load_enrichment_from_csv,
 )
+from src.ingestion.nvd_enrichment import enrich_unique_cves_for_run
 from src.ingestion.tagged_assets import fetch_tagged_assets_with_tags
 from src.ingestion.tenable_client import MockTenableClient, TenableClient
 from src.ingestion.tenable_ingestion import (
@@ -157,6 +158,11 @@ def run_pipeline(
             # Step 3b: CSV-based enrichment (manual overrides on top of tag enrichment)
             logger.info("step_3b_apply_csv_enrichment")
             apply_enrichment(session, run_id)
+            session.commit()
+
+            # Step 3c: NVD enrichment — pulls description + references for each unique CVE
+            logger.info("step_3c_nvd_enrichment")
+            enrich_unique_cves_for_run(session, run_id)
             session.commit()
 
             # Step 4: Reconciliation

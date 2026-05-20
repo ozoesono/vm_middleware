@@ -24,7 +24,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
-from src.common.models import Finding
+from src.common.models import CveDetails, Finding
 
 logger = get_logger("csv_reports")
 
@@ -85,6 +85,10 @@ FINDINGS_COLUMNS = [
     "cve_id",
     "title",
     "severity",
+    "description",       # NVD description (rich text)
+    "solution",          # Combined remediation guidance
+    "references",        # Vendor advisory URLs (newline-separated)
+    "cwe",               # NVD weakness type
     "vpr_score",
     "cvssv3_score",
     "risk_model",
@@ -115,18 +119,108 @@ FINDINGS_COLUMNS = [
     "recurrence_count",
     "jira_ticket_key",
     "jira_ticket_status",
-    "solution",
 ]
 
 
+def _format_solution(finding: Finding, cve: CveDetails | None) -> str:
+    """Build the Solution column. Prefer Tenable's solution if present, fall
+    back to NVD-derived guidance. Always include vendor advisory references
+    if available — those have the actual fix steps."""
+    parts = []
+
+    if finding.solution and finding.solution.strip():
+        parts.append(finding.solution.strip())
+    elif cve and cve.description:
+        # No Tenable solution — give the resolver something actionable
+        parts.append(
+            f"No vendor-specific solution available from Tenable. "
+            f"Refer to vendor advisories (links below) for remediation steps "
+            f"specific to your environment. General guidance: upgrade the "
+            f"affected component to a patched version."
+        )
+
+    # Always include references — they contain the concrete fix steps
+    if cve and cve.references:
+        ref_lines = []
+        for ref in cve.references[:8]:  # cap at 8 to keep CSV readable
+            if isinstance(ref, dict) and ref.get("url"):
+                ref_lines.append(f"- {ref['url']}")
+        if ref_lines:
+            parts.append("References:\n" + "\n".join(ref_lines))
+
+    return "\n\n".join(parts) if parts else ""
+
+
+def _format_description(finding: Finding, cve: CveDetails | None) -> str:
+    """Build the Description column. Combines finding identity, CVE summary,
+    and asset context — all the info a resolver needs to understand the issue.
+    """
+    parts = []
+
+    # 1. Identity line
+    header = f"{finding.cve_id or finding.title or 'Finding'}"
+    if finding.severity:
+        header += f"  •  Severity: {finding.severity}"
+    parts.append(header)
+
+    # 2. NVD description (the real explanation)
+    if cve and cve.description:
+        parts.append(cve.description.strip())
+    elif finding.title and finding.title != finding.cve_id:
+        # Tenable name is sometimes more than just a CVE id
+        parts.append(finding.title)
+
+    # 3. Context
+    ctx_bits = []
+    if cve and cve.cvss_v3_score is not None:
+        ctx_bits.append(f"CVSS v3: {cve.cvss_v3_score}")
+    if finding.vpr_score is not None:
+        ctx_bits.append(f"VPR: {finding.vpr_score}")
+    if cve and cve.cwe_id:
+        ctx_bits.append(f"CWE: {cve.cwe_id}")
+    if finding.source:
+        ctx_bits.append(f"Source: {finding.source}")
+    if ctx_bits:
+        parts.append("  •  ".join(ctx_bits))
+
+    # 4. Affected asset
+    if finding.asset_name:
+        asset_line = f"Affected asset: {finding.asset_name}"
+        if finding.asset_ip:
+            asset_line += f" ({finding.asset_ip})"
+        parts.append(asset_line)
+
+    return "\n\n".join(parts)
+
+
 def report_findings(session: Session, filters: dict | None = None) -> str:
-    """Full findings export with all key fields."""
-    q = _apply_filters(session.query(Finding), filters)
+    """Full findings export with rich description + solution columns.
+
+    LEFT JOINs cve_details (NVD-enriched data) so the report shows the
+    proper CVE description and remediation references even when Tenable
+    omits them (which it does for Cloud Security findings).
+    """
+    q = _apply_filters(
+        session.query(Finding, CveDetails)
+        .outerjoin(CveDetails, Finding.cve_id == CveDetails.cve_id),
+        filters,
+    )
     q = q.order_by(Finding.risk_score.desc())
 
     rows = []
-    for f in q.all():
-        rows.append({col: getattr(f, col, None) for col in FINDINGS_COLUMNS})
+    for finding, cve in q.all():
+        row = {col: getattr(finding, col, None) for col in FINDINGS_COLUMNS if col not in (
+            "description", "solution", "references", "cwe"
+        )}
+        row["description"] = _format_description(finding, cve)
+        row["solution"] = _format_solution(finding, cve)
+        row["cwe"] = cve.cwe_id if cve else None
+        if cve and cve.references:
+            urls = [r["url"] for r in cve.references if isinstance(r, dict) and r.get("url")]
+            row["references"] = "\n".join(urls)
+        else:
+            row["references"] = ""
+        rows.append(row)
 
     logger.info("report_findings_generated", rows=len(rows), filters=filters)
     return _write_csv(rows, FINDINGS_COLUMNS)

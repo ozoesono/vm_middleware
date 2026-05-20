@@ -269,6 +269,32 @@ class PipelineRun(Base):
 # ---------------------------------------------------------------------------
 
 
+class CveDetails(Base):
+    """Cached CVE detail data from NVD (National Vulnerability Database).
+
+    Tenable's Inventory API doesn't return rich descriptions/solutions for
+    Cloud Security findings — only a CVE ID. NVD provides the official
+    description, CVSS scoring, weakness type (CWE), and vendor references
+    (which contain remediation guidance).
+
+    Findings JOIN this table on cve_id at report time to surface details
+    to resolvers without bloating the findings table.
+    """
+
+    __tablename__ = "cve_details"
+
+    cve_id = Column(String(50), primary_key=True)
+    description = Column(Text, nullable=True)
+    cvss_v3_score = Column(Float, nullable=True)
+    cvss_v3_severity = Column(String(20), nullable=True)
+    cwe_id = Column(String(50), nullable=True)
+    cwe_name = Column(String(500), nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    references = Column(JSON, nullable=True)  # list of {"url": ..., "source": ...}
+    source = Column(String(50), nullable=False, default="nvd")
+    last_fetched_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class RiskException(Base):
     """Risk acceptance requests and decisions."""
 
