@@ -263,6 +263,10 @@ class PipelineRun(Base):
     last_batch_idx = Column(Integer, nullable=False, default=0)
     total_batches = Column(Integer, nullable=True)
 
+    # Resilience counters
+    findings_skipped = Column(Integer, nullable=False, default=0)
+    pages_failed = Column(Integer, nullable=False, default=0)
+
 
 # ---------------------------------------------------------------------------
 # Exceptions (risk acceptance)

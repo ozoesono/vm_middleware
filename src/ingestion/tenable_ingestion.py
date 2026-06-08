@@ -256,53 +256,28 @@ def ingest_findings(
     batch_size: int = 500,
     tag_filter: list[str] | None = None,
     clear_staging: bool = True,
-) -> int:
+) -> tuple[int, int]:
     """Normalise and insert findings into the staging table.
+
+    Resilient by design:
+      - A row that fails to normalise is logged and skipped.
+      - A batch that fails on bulk insert falls back to per-row inserts;
+        rows that still fail are logged and skipped.
+      - Returns (saved_count, skipped_count) so the caller can update
+        pipeline_runs.
 
     If tag_filter is provided, findings are filtered client-side first.
     When called from the streaming pipeline, clear_staging=False so each
     page accumulates instead of wiping prior pages.
-
-    Returns the number of findings staged.
     """
     if tag_filter:
         findings = filter_by_tags(findings, tag_filter)
 
-    if not clear_staging:
-        return _ingest_resilient(findings, run_id, session, batch_size)
-
-    # Clear staging table for this run
-    session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
-    session.flush()
-
-    count = 0
-    batch: list[FindingStaging] = []
-
-    for raw_finding in findings:
-        try:
-            staged = normalise_finding(raw_finding, run_id)
-            batch.append(staged)
-            count += 1
-
-            if len(batch) >= batch_size:
-                session.bulk_save_objects(batch)
-                session.flush()
-                batch = []
-        except Exception as e:
-            logger.warning(
-                "finding_normalisation_error",
-                error=str(e),
-                finding_id=raw_finding.get("id"),
-            )
-            continue
-
-    # Flush remaining batch
-    if batch:
-        session.bulk_save_objects(batch)
+    if clear_staging:
+        session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
         session.flush()
 
-    logger.info("findings_staged", count=count, run_id=str(run_id))
-    return count
+    return _ingest_resilient(findings, run_id, session, batch_size)
 
 
 def _ingest_resilient(
@@ -310,23 +285,28 @@ def _ingest_resilient(
     run_id: uuid.UUID,
     session: Session,
     batch_size: int,
-) -> int:
-    """Ingest findings without clearing staging.
+) -> tuple[int, int]:
+    """Resilient ingest: bulk insert with per-row fallback.
 
-    Tries bulk_save_objects first for speed. If a batch fails (e.g. one
-    bad row), falls back to one-by-one inserts so a single bad finding
-    doesn't kill the entire batch. Skipped findings are logged.
+    Tries bulk_save_objects first for speed. If a batch fails (constraint
+    violation, oversized value, etc.) falls back to one-by-one inserts so
+    a single bad finding doesn't kill the entire batch. Skipped findings
+    are logged with their tenable_finding_id.
+
+    Returns (saved_count, skipped_count).
     """
-    count = 0
+    saved = 0
+    skipped = 0
     batch: list[FindingStaging] = []
 
-    def _flush(batch_to_save: list[FindingStaging]) -> int:
+    def _flush(batch_to_save: list[FindingStaging]) -> tuple[int, int]:
+        """Try bulk; on failure fall back to per-row. Returns (saved, skipped)."""
         if not batch_to_save:
-            return 0
+            return 0, 0
         try:
             session.bulk_save_objects(batch_to_save)
             session.flush()
-            return len(batch_to_save)
+            return len(batch_to_save), 0
         except Exception as bulk_err:
             session.rollback()
             logger.warning(
@@ -334,29 +314,34 @@ def _ingest_resilient(
                 error=str(bulk_err)[:200],
                 batch_size=len(batch_to_save),
             )
-            saved = 0
+            b_saved = 0
+            b_skipped = 0
             for sf in batch_to_save:
                 try:
                     session.add(sf)
                     session.flush()
-                    saved += 1
+                    b_saved += 1
                 except Exception as row_err:
                     session.rollback()
+                    b_skipped += 1
                     logger.warning(
                         "row_insert_failed",
                         finding_id=sf.tenable_finding_id,
                         error=str(row_err)[:200],
                     )
-            return saved
+            return b_saved, b_skipped
 
     for raw_finding in findings:
         try:
             staged = normalise_finding(raw_finding, run_id)
             batch.append(staged)
             if len(batch) >= batch_size:
-                count += _flush(batch)
+                s, k = _flush(batch)
+                saved += s
+                skipped += k
                 batch = []
         except Exception as e:
+            skipped += 1
             logger.warning(
                 "finding_normalisation_error",
                 error=str(e),
@@ -365,6 +350,15 @@ def _ingest_resilient(
             continue
 
     if batch:
-        count += _flush(batch)
+        s, k = _flush(batch)
+        saved += s
+        skipped += k
 
-    return count
+    logger.info(
+        "page_ingested",
+        saved=saved,
+        skipped=skipped,
+        total=saved + skipped,
+        run_id=str(run_id),
+    )
+    return saved, skipped

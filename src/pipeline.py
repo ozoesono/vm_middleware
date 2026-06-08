@@ -35,18 +35,36 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _append_error(run: PipelineRun, message: str, max_kept: int = 50) -> None:
+    """Append an error message to the run's errors list, bounded to max_kept.
+    Errors are persisted but capped to avoid unbounded growth on a chronic
+    failure (e.g., every page failing)."""
+    errs = list(run.errors or [])
+    errs.append({"at": _utcnow().isoformat(), "msg": message[:300]})
+    if len(errs) > max_kept:
+        errs = errs[-max_kept:]
+    run.errors = errs
+
+
 def _setup_or_resume_run(
     session,
     config: AppConfig,
-    resume: bool,
+    start_fresh: bool = False,
 ) -> tuple[uuid.UUID, int, bool]:
-    """Either create a fresh run or resume an interrupted one.
+    """Setup the pipeline run.
+
+    Default behaviour is AUTO-RESUME: if there's an incomplete run
+    (status RUNNING/PARTIAL_FAILURE/FAILED) whose tag_filter matches
+    the current request, we resume from its checkpoint. Otherwise we
+    start a fresh run.
+
+    Pass start_fresh=True to force a new run even if an incomplete one
+    exists (it will remain in its current state for forensics).
 
     Returns:
         (run_id, start_offset, is_resume)
     """
-    if resume:
-        # Look for the most recent RUNNING/PARTIAL_FAILURE/FAILED pipeline run
+    if not start_fresh:
         prev = (
             session.query(PipelineRun)
             .filter(PipelineRun.status.in_(["RUNNING", "PARTIAL_FAILURE", "FAILED"]))
@@ -54,25 +72,30 @@ def _setup_or_resume_run(
             .first()
         )
         if prev is not None:
-            # Verify the tag filter hasn't changed (otherwise resume would mix data)
             prev_tags = sorted(prev.tag_filter or [])
             cur_tags = sorted(config.tenable.tag_filter or [])
-            if prev_tags != cur_tags:
-                logger.warning(
-                    "resume_tag_mismatch_starting_fresh",
-                    previous=prev_tags,
-                    current=cur_tags,
-                )
-            else:
+            if prev_tags == cur_tags:
                 logger.info(
-                    "pipeline_resuming",
+                    "auto_resume_detected_incomplete_run",
                     run_id=str(prev.id),
                     last_offset=prev.last_offset,
+                    last_batch_idx=prev.last_batch_idx,
                     pages_completed=prev.pages_completed,
+                    findings_fetched=prev.findings_fetched,
+                    findings_skipped=prev.findings_skipped,
+                    pages_failed=prev.pages_failed,
+                    prev_status=prev.status,
                 )
                 prev.status = "RUNNING"
                 session.flush()
                 return prev.id, prev.last_offset, True
+            else:
+                logger.info(
+                    "incomplete_run_tag_mismatch_starting_fresh",
+                    incomplete_run=str(prev.id),
+                    previous_tags=prev_tags,
+                    current_tags=cur_tags,
+                )
 
     # Fresh run
     run_id = uuid.uuid4()
@@ -85,6 +108,7 @@ def _setup_or_resume_run(
     )
     session.add(pipeline_run)
     session.flush()
+    logger.info("pipeline_fresh_run_started", run_id=str(run_id))
     return run_id, 0, False
 
 
@@ -92,9 +116,21 @@ def run_pipeline(
     config: AppConfig,
     mock_fixture_path: str | None = None,
     enrichment_csv_path: str | None = None,
-    resume: bool = False,
+    start_fresh: bool = False,
 ) -> PipelineRun:
     """Execute the streaming pipeline.
+
+    Resilience guarantees:
+      - Auto-resume: if there's an incomplete run with matching tag_filter,
+        it is continued from its checkpoint. Pass start_fresh=True to force
+        a brand new run.
+      - Per-record fault tolerance: a single malformed finding is logged and
+        skipped (counter: pipeline_runs.findings_skipped).
+      - Per-page fault tolerance: a page that fails entirely is logged and
+        skipped (counter: pipeline_runs.pages_failed); the pipeline advances
+        the checkpoint and continues to the next page.
+      - Resume safety: each page commits before the next page is fetched,
+        so a hard stop at any point loses at most one in-flight page.
 
     Steps:
         1. Setup or resume a pipeline run
@@ -113,7 +149,7 @@ def run_pipeline(
     setup_logging(config.settings.log_level)
 
     with get_session() as session:
-        run_id, start_offset, is_resume = _setup_or_resume_run(session, config, resume)
+        run_id, start_offset, is_resume = _setup_or_resume_run(session, config, start_fresh)
         session.commit()
 
         logger.info(
@@ -277,41 +313,55 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> None:
     )
 
     try:
-        current_batch = start_batch
         for batch_idx, page in client.iter_findings_by_asset_ids(
             asset_ids=asset_ids,
             batch_size=batch_size,
             start_batch=start_batch,
         ):
-            # Stage findings from this page (no client-side filter — server already did it)
+            # Resilient page ingest. ingest_findings will fall back to per-row
+            # inserts internally if a bulk insert fails.
+            saved, skipped = 0, 0
+            page_failed = False
             try:
-                ingest_findings(
+                saved, skipped = ingest_findings(
                     page.findings, run_id, session,
                     tag_filter=None,
                     clear_staging=False,
                 )
             except Exception as e:
-                logger.error("batch_staging_failed", error=str(e)[:200], batch_idx=batch_idx)
+                # Catastrophic page failure (rare with the resilient ingest).
+                # Log it, mark the page as failed, but advance the checkpoint
+                # so the pipeline does not get stuck on a bad page.
+                logger.error(
+                    "page_failed_skipping",
+                    error=str(e)[:200],
+                    batch_idx=batch_idx,
+                    findings_in_page=len(page.findings),
+                )
                 session.rollback()
-                raise
+                page_failed = True
 
-            # Update checkpoint
+            # Always advance the checkpoint so a poison page doesn't loop.
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
-            run.last_batch_idx = batch_idx + 1  # next one to do
+            run.last_batch_idx = batch_idx + 1
             run.pages_completed += 1
             run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
+            run.findings_skipped = (run.findings_skipped or 0) + skipped
+            if page_failed:
+                run.pages_failed = (run.pages_failed or 0) + 1
+                _append_error(run, f"batch {batch_idx} failed")
             session.commit()
-
-            if batch_idx != current_batch:
-                # Just moved to a new batch
-                current_batch = batch_idx
 
             logger.info(
                 "batch_page_committed",
                 batch_idx=batch_idx,
                 of=total_batches,
-                staged_this_page=len(page.findings),
+                saved_this_page=saved,
+                skipped_this_page=skipped,
+                page_failed=page_failed,
                 fetched_total=run.findings_fetched,
+                skipped_total=run.findings_skipped,
+                pages_failed_total=run.pages_failed,
                 progress_pct=round(100 * (batch_idx + 1) / max(total_batches, 1), 1),
             )
 
@@ -338,21 +388,32 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 run.total_findings_expected = page.total
                 session.commit()
 
+            saved, skipped = 0, 0
+            page_failed = False
             try:
-                ingest_findings(
+                saved, skipped = ingest_findings(
                     page.findings, run_id, session,
                     tag_filter=None,
                     clear_staging=False,
                 )
             except Exception as e:
-                logger.error("page_staging_failed", error=str(e)[:200], offset=page.offset)
+                logger.error(
+                    "page_failed_skipping",
+                    error=str(e)[:200],
+                    offset=page.offset,
+                    findings_in_page=len(page.findings),
+                )
                 session.rollback()
-                raise
+                page_failed = True
 
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.last_offset = page.offset + len(page.findings)
             run.pages_completed += 1
             run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
+            run.findings_skipped = (run.findings_skipped or 0) + skipped
+            if page_failed:
+                run.pages_failed = (run.pages_failed or 0) + 1
+                _append_error(run, f"page at offset {page.offset} failed")
             session.commit()
 
             logger.info(
@@ -360,7 +421,12 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 page_num=page_num,
                 offset=page.offset,
                 next_offset=run.last_offset,
+                saved_this_page=saved,
+                skipped_this_page=skipped,
+                page_failed=page_failed,
                 fetched_total=run.findings_fetched,
+                skipped_total=run.findings_skipped,
+                pages_failed_total=run.pages_failed,
                 expected_total=run.total_findings_expected,
                 progress_pct=round(100 * run.findings_fetched / max(run.total_findings_expected or 1, 1), 1),
             )
@@ -379,7 +445,9 @@ def _run_mock(session, config, run_id: uuid.UUID, fixture_path: str) -> None:
         session.commit()
 
         kept = filter_by_tags(raw_findings, config.tenable.tag_filter)
-        ingest_findings(kept, run_id, session, tag_filter=None)
+        saved, skipped = ingest_findings(kept, run_id, session, tag_filter=None)
+        run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+        run.findings_skipped = (run.findings_skipped or 0) + skipped
         session.commit()
     finally:
         client.close()
@@ -398,8 +466,11 @@ def _print_summary(run: PipelineRun) -> None:
     print(f"  Run ID:            {run.id}")
     print(f"  Status:            {run.status}")
     print(f"  Pages completed:   {run.pages_completed}")
+    print(f"  Pages failed:      {run.pages_failed}")
     print(f"  Last offset:       {run.last_offset}")
+    print(f"  Last batch idx:    {run.last_batch_idx}")
     print(f"  Findings fetched:  {run.findings_fetched}")
+    print(f"  Findings skipped:  {run.findings_skipped}")
     print(f"  Expected total:    {run.total_findings_expected}")
     print(f"  New:               {run.findings_new}")
     print(f"  Updated:           {run.findings_updated}")
@@ -410,7 +481,9 @@ def _print_summary(run: PipelineRun) -> None:
     print(f"  Jira actions:      create={run.jira_tickets_created} "
           f"update={run.jira_tickets_updated} close={run.jira_tickets_closed}")
     if run.errors:
-        print(f"  Errors:            {len(run.errors)}")
-        for err in run.errors[:5]:
+        print(f"  Recent errors:     {len(run.errors)}")
+        for err in run.errors[-5:]:
             print(f"    - {err}")
+    if run.status == "PARTIAL_FAILURE":
+        print(f"  --> Run again (without --start-fresh) to resume from checkpoint.")
     print("=" * 60 + "\n")

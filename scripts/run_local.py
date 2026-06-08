@@ -2,21 +2,27 @@
 """Local pipeline runner entry point.
 
 Usage:
-    python scripts/run_local.py
-    python scripts/run_local.py --mock
-    python scripts/run_local.py --tag Portfolio-Business-Growth
-    python scripts/run_local.py --tag Portfolio-Business-Growth --tag Portfolio-Payments
-    python scripts/run_local.py --mode export --tag Portfolio-Business-Growth
+    python scripts/run_local.py                                  # auto-resume or fresh
+    python scripts/run_local.py --start-fresh                    # force new run
+    python scripts/run_local.py --mock                           # mock fixture data
+    python scripts/run_local.py --tag Portfolio-Business-Growth  # filter by tag
+    python scripts/run_local.py --tag Portfolio-A --tag Portfolio-B
+    python scripts/run_local.py --mode export --tag Portfolio-X
+
+Resilience:
+    By DEFAULT, the runner AUTO-RESUMES any incomplete run whose tag_filter
+    matches the current request. Pass --start-fresh to force a new run.
+    Per-record and per-page failures are tolerated (logged + counted on
+    pipeline_runs.findings_skipped / pages_failed); the pipeline continues.
 
 Tag filter:
-    --tag X (repeatable). Only findings whose tag_names contain at least
-    one of the supplied tags will be kept. Filtering is client-side
-    because the Tenable Inventory API doesn't support server-side tag
-    filters reliably.
+    --tag X (repeatable). Pre-flight assets/search advanced query fetches
+    the asset_ids carrying the tag, then findings/search is server-side
+    filtered. Tags accumulate (OR logic).
 
 Retrieval mode:
-    --mode search (default) — synchronous paginated, good for small datasets
-    --mode export — async bulk export, recommended for >50k findings
+    --mode search (default) — synchronous paginated
+    --mode export — async bulk export (cannot be combined with --tag)
 
 Severity filter:
     --severity Critical --severity High (repeatable)
@@ -75,7 +81,12 @@ def main():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume the most recent incomplete pipeline run (RUNNING/PARTIAL_FAILURE/FAILED)",
+        help="(legacy alias) Auto-resume is now the default; this flag is a no-op.",
+    )
+    parser.add_argument(
+        "--start-fresh",
+        action="store_true",
+        help="Force a brand new pipeline run, ignoring any incomplete one.",
     )
     args = parser.parse_args()
 
@@ -114,7 +125,7 @@ def main():
         config=config,
         mock_fixture_path=mock_path,
         enrichment_csv_path=enrichment_path,
-        resume=args.resume,
+        start_fresh=args.start_fresh,
     )
 
 
