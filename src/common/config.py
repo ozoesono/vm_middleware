@@ -120,6 +120,19 @@ class TenableConfig(BaseModel):
     max_consecutive_fetch_failures: int = 5
 
 
+class NvdConfig(BaseModel):
+    """NVD enrichment settings.
+
+    By default NVD enrichment is DECOUPLED from the pipeline: the pipeline
+    does not block on it. Run `scripts/enrich_nvd.py` separately (resumable)
+    to backfill CVE descriptions, or set inline_enrichment=true with a small
+    max_cves_per_run to fetch a bounded chunk at the end of each pipeline run.
+    """
+    ttl_days: int = 60
+    inline_enrichment: bool = False
+    max_cves_per_run: int = 0  # bound for inline mode (0 = none inline)
+
+
 class JiraConfig(BaseModel):
     base_url: str = "https://org.atlassian.net"
     default_project: str = "VULN"
@@ -196,6 +209,9 @@ class AppConfig:
 
         jira_data = _load_yaml(config_dir, "jira.yaml").get("jira", {})
         self.jira = JiraConfig(**jira_data)
+
+        nvd_data = _load_yaml(config_dir, "nvd.yaml").get("nvd", {})
+        self.nvd = NvdConfig(**nvd_data)
 
 
 @lru_cache()

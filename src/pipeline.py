@@ -233,12 +233,8 @@ def run_pipeline(
             apply_enrichment(session, run_id)
             session.commit()
 
-            # Step 3c: NVD enrichment — pulls description + references for each unique CVE
-            logger.info("step_3c_nvd_enrichment")
-            enrich_unique_cves_for_run(session, run_id)
-            session.commit()
-
-            # Step 4: Reconciliation
+            # Step 4: Reconciliation — runs BEFORE NVD so findings are scored
+            # and reportable without waiting on the (slow) CVE description fetch.
             logger.info("step_4_scoring_reconciliation")
             recon_stats = reconcile(session, config, run_id)
 
@@ -249,6 +245,7 @@ def run_pipeline(
             run.findings_remediated = recon_stats.findings_remediated
             run.findings_recurred = recon_stats.findings_recurred
             run.findings_stale = recon_stats.findings_stale
+            session.commit()
 
             # Step 5: Log Jira queue (not actually called in Phase 0)
             actions = (
@@ -258,7 +255,25 @@ def run_pipeline(
             )
             logger.info("step_5_jira_queue", actions=actions)
 
-            # Clean up staging for this run
+            # Step 6: Inline NVD enrichment — OFF by default and BOUNDED.
+            # The findings are already scored + reportable at this point. NVD
+            # only enriches the report Description column. Run the standalone
+            # scripts/enrich_nvd.py to backfill descriptions without blocking.
+            if config.nvd.inline_enrichment and config.nvd.max_cves_per_run > 0:
+                logger.info("step_6_inline_nvd_enrichment", max=config.nvd.max_cves_per_run)
+                enrich_unique_cves_for_run(
+                    session, run_id,
+                    ttl_days=config.nvd.ttl_days,
+                    max_fetch=config.nvd.max_cves_per_run,
+                )
+                session.commit()
+            else:
+                logger.info(
+                    "step_6_nvd_skipped_inline",
+                    hint="run scripts/enrich_nvd.py to backfill CVE descriptions",
+                )
+
+            # Step 7: Clean up staging for this run
             session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
 
             # If some pages were skipped (fetch/stage failures) but ingestion

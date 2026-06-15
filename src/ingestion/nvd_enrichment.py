@@ -135,91 +135,56 @@ def _fetch_one(client: httpx.Client, cve_id: str, api_key: str | None) -> dict |
         return None
 
 
-def enrich_unique_cves_for_run(
-    session: Session,
-    run_id,
-    ttl_days: int = 60,
-    api_key: str | None = None,
-) -> int:
-    """Look at all staged findings for this run, find unique CVEs not yet
-    cached (or cached but stale), and fetch them from NVD.
-
-    Args:
-        session: DB session
-        run_id: pipeline run UUID
-        ttl_days: refresh cached entries older than this
-        api_key: NVD API key (recommended; from NVD_API_KEY env if None)
-
-    Returns the number of CVEs newly cached/refreshed.
-    """
-    api_key = api_key or os.environ.get("NVD_API_KEY")
-    rate_count, rate_window = RATE_LIMIT_WITH_KEY if api_key else RATE_LIMIT_NO_KEY
-    sleep_between = rate_window / rate_count  # seconds between calls
-
-    # Collect unique CVEs from this run's staging
-    cve_rows = (
-        session.query(FindingStaging.cve_id)
-        .filter(FindingStaging.run_id == run_id, FindingStaging.cve_id.isnot(None))
-        .distinct()
-        .all()
-    )
-    unique_cves = {r[0] for r in cve_rows if r[0]}
-    if not unique_cves:
-        logger.info("nvd_no_cves_to_enrich")
-        return 0
-
-    # Filter to ones we don't have or that are stale
+def _filter_to_fetch(session: Session, cve_ids: set[str], ttl_days: int) -> list[str]:
+    """Given candidate CVEs, return the sorted subset that needs fetching
+    (never cached, or cached but older than ttl_days)."""
+    if not cve_ids:
+        return []
     cutoff = _utcnow() - timedelta(days=ttl_days)
     existing = (
         session.query(CveDetails.cve_id, CveDetails.last_fetched_at)
-        .filter(CveDetails.cve_id.in_(unique_cves))
+        .filter(CveDetails.cve_id.in_(cve_ids))
         .all()
     )
     fresh_ids = {row.cve_id for row in existing if row.last_fetched_at >= cutoff}
-    to_fetch = sorted(unique_cves - fresh_ids)
+    return sorted(cve_ids - fresh_ids)
 
-    logger.info(
-        "nvd_enrichment_start",
-        unique_cves=len(unique_cves),
-        already_cached=len(fresh_ids),
-        to_fetch=len(to_fetch),
-        api_key_present=bool(api_key),
-        est_seconds=int(len(to_fetch) * sleep_between),
-    )
 
+def _fetch_and_cache(
+    session: Session,
+    to_fetch: list[str],
+    api_key: str | None,
+) -> int:
+    """Fetch each CVE from NVD and upsert into cve_details. Rate-limited.
+    Commits every 50 so an interruption keeps prior progress. Returns count cached."""
     if not to_fetch:
         return 0
+
+    rate_count, rate_window = RATE_LIMIT_WITH_KEY if api_key else RATE_LIMIT_NO_KEY
+    sleep_between = rate_window / rate_count
 
     cached = 0
     last_call = 0.0
     with httpx.Client(timeout=60) as client:
         for i, cve_id in enumerate(to_fetch, 1):
-            # Respect rate limit
             elapsed = time.time() - last_call
             if elapsed < sleep_between:
                 time.sleep(sleep_between - elapsed)
 
             details = _fetch_one(client, cve_id, api_key)
             last_call = time.time()
-
             if details is None:
                 continue
 
-            # Upsert
             existing_row = session.query(CveDetails).filter_by(cve_id=cve_id).first()
             if existing_row:
                 for k, v in details.items():
                     setattr(existing_row, k, v)
                 existing_row.last_fetched_at = _utcnow()
             else:
-                session.add(CveDetails(
-                    **details,
-                    last_fetched_at=_utcnow(),
-                    source="nvd",
-                ))
+                session.add(CveDetails(**details, last_fetched_at=_utcnow(), source="nvd"))
             cached += 1
 
-            # Commit every 50 to avoid losing progress on interrupt
             if i % 50 == 0:
                 session.commit()
                 logger.info("nvd_progress", done=i, of=len(to_fetch), cached=cached)
@@ -227,3 +192,85 @@ def enrich_unique_cves_for_run(
     session.commit()
     logger.info("nvd_enrichment_done", cached=cached, of=len(to_fetch))
     return cached
+
+
+def enrich_unique_cves_for_run(
+    session: Session,
+    run_id,
+    ttl_days: int = 60,
+    api_key: str | None = None,
+    max_fetch: int | None = None,
+) -> int:
+    """Enrich CVEs from a run's STAGING table. Bounded by max_fetch.
+
+    Used inline by the pipeline only when nvd.inline_enrichment is on AND
+    a max is set — so it never blocks the pipeline for hours.
+    """
+    api_key = api_key or os.environ.get("NVD_API_KEY")
+
+    cve_rows = (
+        session.query(FindingStaging.cve_id)
+        .filter(FindingStaging.run_id == run_id, FindingStaging.cve_id.isnot(None))
+        .distinct()
+        .all()
+    )
+    unique_cves = {r[0] for r in cve_rows if r[0]}
+    to_fetch = _filter_to_fetch(session, unique_cves, ttl_days)
+
+    if max_fetch is not None and max_fetch >= 0:
+        to_fetch = to_fetch[:max_fetch]
+
+    logger.info(
+        "nvd_enrichment_start",
+        scope="staging",
+        unique_cves=len(unique_cves),
+        to_fetch=len(to_fetch),
+        max_fetch=max_fetch,
+        api_key_present=bool(api_key),
+    )
+    return _fetch_and_cache(session, to_fetch, api_key)
+
+
+def enrich_cves_from_findings(
+    session: Session,
+    ttl_days: int = 60,
+    api_key: str | None = None,
+    max_fetch: int | None = None,
+) -> int:
+    """Enrich CVEs from the canonical FINDINGS table — the standalone path.
+
+    Scans every distinct cve_id on findings, fetches those not yet cached
+    (or stale), and caches them. Fully resumable: the cache accumulates,
+    so re-running picks up where it left off. Bound the work per invocation
+    with max_fetch (good for Lambda — fetch a chunk per scheduled run).
+
+    Returns the number of CVEs cached this invocation.
+    """
+    from src.common.models import Finding  # local import to avoid cycles
+
+    api_key = api_key or os.environ.get("NVD_API_KEY")
+
+    cve_rows = (
+        session.query(Finding.cve_id)
+        .filter(Finding.cve_id.isnot(None))
+        .distinct()
+        .all()
+    )
+    unique_cves = {r[0] for r in cve_rows if r[0]}
+    to_fetch = _filter_to_fetch(session, unique_cves, ttl_days)
+
+    if max_fetch is not None and max_fetch >= 0:
+        to_fetch = to_fetch[:max_fetch]
+
+    rate_count, rate_window = RATE_LIMIT_WITH_KEY if api_key else RATE_LIMIT_NO_KEY
+    sleep_between = rate_window / rate_count
+    logger.info(
+        "nvd_enrichment_start",
+        scope="findings",
+        unique_cves=len(unique_cves),
+        to_fetch=len(to_fetch),
+        max_fetch=max_fetch,
+        api_key_present=bool(api_key),
+        est_seconds=int(len(to_fetch) * sleep_between),
+    )
+    return _fetch_and_cache(session, to_fetch, api_key)

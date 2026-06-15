@@ -8,8 +8,99 @@ from unittest.mock import patch
 import pytest
 
 from src.common.models import CveDetails, Finding, FindingStaging
-from src.ingestion.nvd_enrichment import _parse_nvd_response, enrich_unique_cves_for_run
+from src.ingestion.nvd_enrichment import (
+    _parse_nvd_response,
+    enrich_cves_from_findings,
+    enrich_unique_cves_for_run,
+)
 from src.reporting import csv_reports
+
+
+# ---------------------------------------------------------------------------
+# Standalone enrichment from the findings table + max_fetch bound
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichFromFindings:
+    def _fake(self, client, cve_id, api_key):
+        return {
+            "cve_id": cve_id, "description": f"d-{cve_id}",
+            "cvss_v3_score": None, "cvss_v3_severity": None,
+            "cwe_id": None, "cwe_name": None, "published_at": None, "references": [],
+        }
+
+    def test_enriches_distinct_cves_from_findings_table(self, db_session):
+        for i, cve in enumerate(["CVE-2024-1", "CVE-2024-2", "CVE-2024-1"]):  # dup
+            db_session.add(Finding(
+                id=uuid.uuid4(), tenable_finding_id=f"f{i}", title="t",
+                severity="HIGH", cve_id=cve, risk_model="custom",
+                risk_score=0.5, risk_rating="HIGH", sla_days=30, sla_status="WITHIN_SLA",
+                state="OPEN",
+            ))
+        db_session.flush()
+
+        with patch("src.ingestion.nvd_enrichment._fetch_one", side_effect=self._fake), \
+             patch("src.ingestion.nvd_enrichment.time.sleep"):
+            cached = enrich_cves_from_findings(db_session, ttl_days=30)
+
+        assert cached == 2  # distinct
+        assert {c.cve_id for c in db_session.query(CveDetails).all()} == {"CVE-2024-1", "CVE-2024-2"}
+
+    def test_max_fetch_bounds_the_work(self, db_session):
+        for i in range(5):
+            db_session.add(Finding(
+                id=uuid.uuid4(), tenable_finding_id=f"f{i}", title="t",
+                severity="HIGH", cve_id=f"CVE-2024-{i}", risk_model="custom",
+                risk_score=0.5, risk_rating="HIGH", sla_days=30, sla_status="WITHIN_SLA",
+                state="OPEN",
+            ))
+        db_session.flush()
+
+        with patch("src.ingestion.nvd_enrichment._fetch_one", side_effect=self._fake), \
+             patch("src.ingestion.nvd_enrichment.time.sleep"):
+            cached = enrich_cves_from_findings(db_session, ttl_days=30, max_fetch=2)
+
+        assert cached == 2  # only 2 fetched despite 5 candidates
+
+    def test_resumable_only_fetches_uncached(self, db_session):
+        # One already cached
+        db_session.add(CveDetails(cve_id="CVE-2024-1", description="x", last_fetched_at=datetime.utcnow()))
+        for i in [1, 2]:
+            db_session.add(Finding(
+                id=uuid.uuid4(), tenable_finding_id=f"f{i}", title="t",
+                severity="HIGH", cve_id=f"CVE-2024-{i}", risk_model="custom",
+                risk_score=0.5, risk_rating="HIGH", sla_days=30, sla_status="WITHIN_SLA",
+                state="OPEN",
+            ))
+        db_session.flush()
+
+        with patch("src.ingestion.nvd_enrichment._fetch_one", side_effect=self._fake), \
+             patch("src.ingestion.nvd_enrichment.time.sleep"):
+            cached = enrich_cves_from_findings(db_session, ttl_days=30)
+
+        assert cached == 1  # only CVE-2024-2 needed fetching
+
+
+class TestInlineBound:
+    def test_max_fetch_bounds_staging_path(self, db_session):
+        run_id = uuid.uuid4()
+        for i in range(4):
+            db_session.add(FindingStaging(
+                id=uuid.uuid4(), run_id=run_id, tenable_finding_id=f"f{i}",
+                title="t", severity="HIGH", cve_id=f"CVE-2024-{i}", tenable_state="ACTIVE",
+            ))
+        db_session.flush()
+
+        def fake(client, cve_id, api_key):
+            return {"cve_id": cve_id, "description": "d", "cvss_v3_score": None,
+                    "cvss_v3_severity": None, "cwe_id": None, "cwe_name": None,
+                    "published_at": None, "references": []}
+
+        with patch("src.ingestion.nvd_enrichment._fetch_one", side_effect=fake), \
+             patch("src.ingestion.nvd_enrichment.time.sleep"):
+            cached = enrich_unique_cves_for_run(db_session, run_id, ttl_days=30, max_fetch=1)
+
+        assert cached == 1
 
 
 # ---------------------------------------------------------------------------

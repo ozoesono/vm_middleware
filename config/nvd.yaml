@@ -1,0 +1,14 @@
+nvd:
+  # How long a cached CVE detail stays fresh before re-fetching.
+  ttl_days: 60
+
+  # NVD enrichment is DECOUPLED from the pipeline by default. The pipeline
+  # finishes (findings scored + reportable) without waiting on NVD. Run
+  # `scripts/enrich_nvd.py` separately to backfill CVE descriptions — it is
+  # fully resumable and can be scheduled independently.
+  #
+  # Set inline_enrichment: true to fetch a SMALL bounded chunk at the end of
+  # each pipeline run instead. Keep max_cves_per_run small so the pipeline
+  # is never blocked for long (NVD without an API key is ~6 seconds/CVE).
+  inline_enrichment: false
+  max_cves_per_run: 0
