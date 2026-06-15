@@ -46,6 +46,28 @@ def _append_error(run: PipelineRun, message: str, max_kept: int = 50) -> None:
     run.errors = errs
 
 
+def _stage_page(session, run_id: uuid.UUID, findings: list) -> tuple[int, int, bool]:
+    """Stage one page's findings resiliently.
+
+    ingest_findings already does per-record fault tolerance internally.
+    This wraps it once more so a catastrophic staging failure (e.g. the
+    session itself is broken) is caught rather than crashing the loop.
+
+    Returns (saved, skipped, page_failed).
+    """
+    try:
+        saved, skipped = ingest_findings(
+            findings, run_id, session,
+            tag_filter=None,
+            clear_staging=False,
+        )
+        return saved, skipped, False
+    except Exception as e:
+        logger.error("page_stage_failed_skipping", error=str(e)[:200], findings_in_page=len(findings))
+        session.rollback()
+        return 0, 0, True
+
+
 def _setup_or_resume_run(
     session,
     config: AppConfig,
@@ -172,8 +194,23 @@ def run_pipeline(
 
             if mock_fixture_path:
                 _run_mock(session, config, run_id, mock_fixture_path)
+                ingestion_complete = True
             else:
-                _run_streaming(session, config, run_id, start_offset)
+                ingestion_complete = _run_streaming(session, config, run_id, start_offset)
+
+            # If ingestion aborted early (persistent fetch failures), DO NOT
+            # reconcile — a partial dataset would wrongly mark unfetched findings
+            # as STALE. Leave the run PARTIAL_FAILURE + staging intact so the next
+            # run resumes ingestion from the checkpoint.
+            if not ingestion_complete:
+                run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+                run.status = "PARTIAL_FAILURE"
+                run.completed_at = _utcnow()
+                _append_error(run, "ingestion aborted early (persistent fetch failures); resumable")
+                session.commit()
+                logger.warning("pipeline_ingestion_incomplete_resumable", run_id=str(run_id))
+                _print_summary(run)
+                return run
 
             # Step 3a: Apply tag-based enrichment from the asset_tags_map (if any)
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
@@ -224,7 +261,11 @@ def run_pipeline(
             # Clean up staging for this run
             session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
 
-            run.status = "SUCCESS"
+            # If some pages were skipped (fetch/stage failures) but ingestion
+            # ran to completion, mark COMPLETED_WITH_ERRORS rather than SUCCESS.
+            # This is NOT in the auto-resume set: the missed findings will be
+            # re-pulled on the next scheduled run (pull-and-reconcile).
+            run.status = "COMPLETED_WITH_ERRORS" if (run.pages_failed or 0) > 0 else "SUCCESS"
             run.completed_at = _utcnow()
             session.commit()
 
@@ -234,7 +275,7 @@ def run_pipeline(
             if run is not None:
                 run.status = "PARTIAL_FAILURE"  # so it can be resumed
                 run.completed_at = _utcnow()
-                run.errors = [str(e)]
+                _append_error(run, f"unhandled pipeline error: {str(e)[:200]}")
                 session.commit()
             raise
 
@@ -243,25 +284,30 @@ def run_pipeline(
         return run
 
 
-def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> None:
+def _run_streaming(session, config, run_id: uuid.UUID, start_offset: int) -> bool:
     """Stream findings from Tenable.
+
+    Returns True if ingestion completed, False if it aborted early due to
+    persistent fetch failures (run stays resumable).
 
     Two paths:
       A) tag_filter is set:
          - Pre-flight: fetch asset_ids for the tag via assets/search (advanced)
          - Then call findings/search batched by asset_id (server-side filter)
-         - Way faster: only the matching findings come back
       B) No tag_filter:
-         - Fall back to streaming all findings (legacy path)
+         - Stream all findings (legacy path)
     """
     if config.tenable.tag_filter:
-        _run_streaming_by_tagged_assets(session, config, run_id)
+        return _run_streaming_by_tagged_assets(session, config, run_id)
     else:
-        _run_streaming_all(session, config, run_id, start_offset)
+        return _run_streaming_all(session, config, run_id, start_offset)
 
 
-def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> None:
-    """Tagged-asset path: fetch asset_ids+tags first, then batched server-side filter."""
+def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
+    """Tagged-asset path: fetch asset_ids+tags first, then batched server-side filter.
+
+    Returns True if all batches were attempted, False if aborted early.
+    """
     run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
 
     # Either resume an existing asset list or fetch fresh
@@ -299,7 +345,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> None:
 
     if not asset_ids:
         logger.warning("no_tagged_assets_found_nothing_to_fetch")
-        return
+        return True  # nothing to fetch is a complete (empty) ingestion
 
     batch_size = 500
     total_batches = (len(asset_ids) + batch_size - 1) // batch_size
@@ -312,114 +358,160 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> None:
         secret_key=config.settings.tenable_secret_key,
     )
 
-    try:
-        for batch_idx, page in client.iter_findings_by_asset_ids(
-            asset_ids=asset_ids,
-            batch_size=batch_size,
-            start_batch=start_batch,
-        ):
-            # Resilient page ingest. ingest_findings will fall back to per-row
-            # inserts internally if a bulk insert fails.
-            saved, skipped = 0, 0
-            page_failed = False
-            try:
-                saved, skipped = ingest_findings(
-                    page.findings, run_id, session,
-                    tag_filter=None,
-                    clear_staging=False,
-                )
-            except Exception as e:
-                # Catastrophic page failure (rare with the resilient ingest).
-                # Log it, mark the page as failed, but advance the checkpoint
-                # so the pipeline does not get stuck on a bad page.
-                logger.error(
-                    "page_failed_skipping",
-                    error=str(e)[:200],
-                    batch_idx=batch_idx,
-                    findings_in_page=len(page.findings),
-                )
-                session.rollback()
-                page_failed = True
+    page_size = config.tenable.page_size
+    max_consec = config.tenable.max_consecutive_fetch_failures
 
-            # Always advance the checkpoint so a poison page doesn't loop.
+    try:
+        consec_failures = 0
+
+        # Drive batch iteration MANUALLY so a failed batch FETCH is caught,
+        # logged, the checkpoint advanced, and the next batch attempted.
+        for batch_idx in range(start_batch, total_batches):
+            batch = asset_ids[batch_idx * batch_size:(batch_idx + 1) * batch_size]
+
+            batch_saved = 0
+            batch_skipped = 0
+            batch_failed = False
+
+            # Paginate within this batch (a batch can have >page_size findings)
+            offset = 0
+            batch_total: int | None = None
+            while True:
+                try:
+                    page = client.fetch_asset_page(batch, offset=offset, limit=page_size)
+                    consec_failures = 0
+                except Exception as e:
+                    consec_failures += 1
+                    batch_failed = True
+                    logger.error(
+                        "batch_fetch_failed_skipping",
+                        error=str(e)[:200],
+                        batch_idx=batch_idx,
+                        offset=offset,
+                        consecutive_failures=consec_failures,
+                    )
+                    break  # skip the rest of this batch; move to the next
+
+                if batch_total is None:
+                    batch_total = page.total
+
+                saved, skipped, page_failed = _stage_page(session, run_id, page.findings)
+                batch_saved += saved
+                batch_skipped += skipped
+                if page_failed:
+                    batch_failed = True
+
+                offset += page_size
+                if offset >= (batch_total or 0) or len(page.findings) == 0:
+                    break
+
+            # Advance checkpoint (always, even if the batch failed)
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.last_batch_idx = batch_idx + 1
             run.pages_completed += 1
-            run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
-            run.findings_skipped = (run.findings_skipped or 0) + skipped
-            if page_failed:
+            run.findings_fetched = (run.findings_fetched or 0) + batch_saved + batch_skipped
+            run.findings_skipped = (run.findings_skipped or 0) + batch_skipped
+            if batch_failed:
                 run.pages_failed = (run.pages_failed or 0) + 1
-                _append_error(run, f"batch {batch_idx} failed")
+                _append_error(run, f"batch {batch_idx} (asset_ids {batch[0]}...) had failures")
             session.commit()
 
             logger.info(
-                "batch_page_committed",
+                "batch_committed",
                 batch_idx=batch_idx,
                 of=total_batches,
-                saved_this_page=saved,
-                skipped_this_page=skipped,
-                page_failed=page_failed,
+                saved_this_batch=batch_saved,
+                skipped_this_batch=batch_skipped,
+                batch_failed=batch_failed,
                 fetched_total=run.findings_fetched,
                 skipped_total=run.findings_skipped,
                 pages_failed_total=run.pages_failed,
                 progress_pct=round(100 * (batch_idx + 1) / max(total_batches, 1), 1),
             )
 
+            if consec_failures >= max_consec:
+                logger.error("aborting_after_consecutive_fetch_failures", count=consec_failures)
+                return False  # aborted early — caller keeps run resumable
+
         logger.info("batched_fetch_done", run_id=str(run_id))
+        return True
     finally:
         client.close()
 
 
-def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) -> None:
-    """No-tag path: stream all findings (legacy, slow on full datasets)."""
+def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) -> bool:
+    """No-tag path: stream all findings (legacy, slow on full datasets).
+
+    Drives pagination MANUALLY so a failed page FETCH (HTTP error after the
+    per-request retries are exhausted) is caught, logged, counted, and skipped
+    — the offset advances and the pipeline continues to the next page rather
+    than crashing. A run of consecutive fetch failures aborts gracefully
+    (run stays resumable).
+    """
     client = TenableClient(
         config=config.tenable,
         access_key=config.settings.tenable_access_key,
         secret_key=config.settings.tenable_secret_key,
     )
 
-    try:
-        page_num = 0
-        for page in client.iter_pages(start_offset=start_offset):
-            page_num += 1
+    page_size = config.tenable.page_size
+    max_consec = config.tenable.max_consecutive_fetch_failures
 
-            if page_num == 1:
+    try:
+        offset = start_offset
+        total: int | None = None
+        consec_failures = 0
+
+        while True:
+            # --- Fetch (resilient) ---
+            try:
+                page = client.fetch_page(offset=offset, limit=page_size)
+                consec_failures = 0
+            except Exception as e:
+                consec_failures += 1
+                logger.error(
+                    "page_fetch_failed_skipping",
+                    error=str(e)[:200],
+                    offset=offset,
+                    consecutive_failures=consec_failures,
+                )
                 run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
-                run.total_findings_expected = page.total
+                run.pages_failed = (run.pages_failed or 0) + 1
+                run.last_offset = offset + page_size  # advance past the bad page
+                _append_error(run, f"fetch failed at offset {offset}: {str(e)[:120]}")
                 session.commit()
 
-            saved, skipped = 0, 0
-            page_failed = False
-            try:
-                saved, skipped = ingest_findings(
-                    page.findings, run_id, session,
-                    tag_filter=None,
-                    clear_staging=False,
-                )
-            except Exception as e:
-                logger.error(
-                    "page_failed_skipping",
-                    error=str(e)[:200],
-                    offset=page.offset,
-                    findings_in_page=len(page.findings),
-                )
-                session.rollback()
-                page_failed = True
+                if consec_failures >= max_consec:
+                    logger.error("aborting_after_consecutive_fetch_failures", count=consec_failures)
+                    return False  # aborted early — caller keeps run resumable
+
+                offset += page_size
+                if total is not None and offset >= total:
+                    return True
+                continue
+
+            if total is None:
+                total = page.total
+                run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+                run.total_findings_expected = total
+                session.commit()
+
+            # --- Stage (resilient) ---
+            saved, skipped, page_failed = _stage_page(session, run_id, page.findings)
 
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
-            run.last_offset = page.offset + len(page.findings)
+            run.last_offset = offset + len(page.findings)
             run.pages_completed += 1
             run.findings_fetched = (run.findings_fetched or 0) + len(page.findings)
             run.findings_skipped = (run.findings_skipped or 0) + skipped
             if page_failed:
                 run.pages_failed = (run.pages_failed or 0) + 1
-                _append_error(run, f"page at offset {page.offset} failed")
+                _append_error(run, f"stage failed at offset {offset}")
             session.commit()
 
             logger.info(
                 "page_committed",
-                page_num=page_num,
-                offset=page.offset,
+                offset=offset,
                 next_offset=run.last_offset,
                 saved_this_page=saved,
                 skipped_this_page=skipped,
@@ -427,9 +519,13 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 fetched_total=run.findings_fetched,
                 skipped_total=run.findings_skipped,
                 pages_failed_total=run.pages_failed,
-                expected_total=run.total_findings_expected,
-                progress_pct=round(100 * run.findings_fetched / max(run.total_findings_expected or 1, 1), 1),
+                expected_total=total,
+                progress_pct=round(100 * run.findings_fetched / max(total or 1, 1), 1),
             )
+
+            offset += page_size
+            if offset >= (total or 0) or len(page.findings) == 0:
+                return True
     finally:
         client.close()
 
@@ -486,4 +582,7 @@ def _print_summary(run: PipelineRun) -> None:
             print(f"    - {err}")
     if run.status == "PARTIAL_FAILURE":
         print(f"  --> Run again (without --start-fresh) to resume from checkpoint.")
+    elif run.status == "COMPLETED_WITH_ERRORS":
+        print(f"  --> Completed but {run.pages_failed} page(s) failed; missed findings")
+        print(f"      will be re-pulled on the next scheduled run.")
     print("=" * 60 + "\n")

@@ -113,6 +113,11 @@ class TenableConfig(BaseModel):
     max_retries: int = 3
     export_poll_interval: int = 10  # seconds between status polls
     export_max_wait: int = 600  # max seconds to wait for export
+    # Resilience: how many page/batch FETCHES may fail in a row (after the
+    # per-request retries are exhausted) before the run aborts. The run is
+    # marked PARTIAL_FAILURE and can be resumed; this just stops the pipeline
+    # from spinning forever against a persistently failing API.
+    max_consecutive_fetch_failures: int = 5
 
 
 class JiraConfig(BaseModel):

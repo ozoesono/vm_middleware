@@ -183,6 +183,30 @@ class TenableClient:
             limit=pagination.get("limit", limit),
         )
 
+    def fetch_page(
+        self,
+        offset: int,
+        limit: int | None = None,
+        filters: list[dict] | None = None,
+    ) -> TenableFindingsPage:
+        """Public single-page fetch (sync search). Retries internally on 429.
+
+        Lets callers drive pagination manually and wrap each fetch in their
+        own try/except for fetch-level fault tolerance.
+        """
+        return self._fetch_page(offset=offset, limit=limit, filters=filters)
+
+    def fetch_asset_page(
+        self,
+        asset_ids: list[str],
+        offset: int,
+        limit: int | None = None,
+    ) -> TenableFindingsPage:
+        """Public single-page fetch filtered server-side by asset_ids."""
+        return self._fetch_page_with_asset_filter(
+            asset_ids=asset_ids, offset=offset, limit=limit or self.config.page_size
+        )
+
     def iter_pages(
         self,
         start_offset: int = 0,

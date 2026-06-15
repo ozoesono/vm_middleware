@@ -188,6 +188,85 @@ class TestAutoResume:
 # ---------------------------------------------------------------------------
 
 
+class TestFetchFailureTolerance:
+    """The streaming loop must tolerate a page FETCH failure (HTTP error after
+    retries), not just a staging failure."""
+
+    def _config(self):
+        settings = AppSettings(database_url="sqlite:///:memory:", config_dir="config")
+        cfg = AppConfig(settings=settings)
+        cfg.tenable.tag_filter = None  # use the _run_streaming_all path
+        cfg.tenable.page_size = 2
+        cfg.tenable.max_consecutive_fetch_failures = 5
+        return cfg
+
+    def test_single_fetch_failure_is_skipped_not_crashed(self, db_session):
+        """One bad page fetch in the middle is logged, skipped, and the loop
+        continues. The run does NOT crash."""
+        from unittest.mock import patch
+        from src.common.models import PipelineRun
+        from src.ingestion.tenable_client import TenableFindingsPage
+        from src import pipeline
+
+        run = PipelineRun(id=uuid.uuid4(), status="RUNNING", tag_filter=None)
+        db_session.add(run)
+        db_session.flush()
+        run_id = run.id
+
+        def make_page(offset):
+            return TenableFindingsPage(
+                findings=[_good_finding(f"f{offset}_a"), _good_finding(f"f{offset}_b")],
+                total=6, offset=offset, limit=2,
+            )
+
+        # offset 0 -> ok, offset 2 -> FETCH FAILS, offset 4 -> ok
+        def fake_fetch(offset, limit=None, filters=None):
+            if offset == 2:
+                raise RuntimeError("simulated HTTP fetch failure after retries")
+            return make_page(offset)
+
+        cfg = self._config()
+        with patch.object(pipeline.TenableClient, "fetch_page", side_effect=fake_fetch), \
+             patch.object(pipeline.TenableClient, "close"):
+            completed = pipeline._run_streaming_all(db_session, cfg, run_id, start_offset=0)
+
+        # Loop ran to completion (did not crash, did not abort)
+        assert completed is True
+
+        run = db_session.query(PipelineRun).filter_by(id=run_id).first()
+        assert run.pages_failed == 1                 # the offset=2 page
+        # Findings from offset 0 and offset 4 were staged (4 records)
+        from src.common.models import FindingStaging
+        staged = db_session.query(FindingStaging).filter_by(run_id=run_id).count()
+        assert staged == 4
+
+    def test_persistent_fetch_failure_aborts_resumably(self, db_session):
+        """If fetches keep failing, the loop aborts (returns False) rather than
+        spinning forever — and the run is left resumable."""
+        from unittest.mock import patch
+        from src.common.models import PipelineRun
+        from src import pipeline
+
+        run = PipelineRun(id=uuid.uuid4(), status="RUNNING", tag_filter=None)
+        db_session.add(run)
+        db_session.flush()
+        run_id = run.id
+
+        def always_fail(offset, limit=None, filters=None):
+            raise RuntimeError("API is down")
+
+        cfg = self._config()
+        cfg.tenable.max_consecutive_fetch_failures = 3
+
+        with patch.object(pipeline.TenableClient, "fetch_page", side_effect=always_fail), \
+             patch.object(pipeline.TenableClient, "close"):
+            completed = pipeline._run_streaming_all(db_session, cfg, run_id, start_offset=0)
+
+        assert completed is False  # aborted — caller will mark PARTIAL_FAILURE
+        run = db_session.query(PipelineRun).filter_by(id=run_id).first()
+        assert run.pages_failed == 3
+
+
 class TestAppendError:
     def test_appends_with_timestamp(self):
         from src.pipeline import _append_error
