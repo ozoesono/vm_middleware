@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -152,10 +152,12 @@ class JiraConfig(BaseModel):
 class AppSettings(BaseSettings):
     """Top-level application settings, sourced from env vars."""
 
-    database_url: str = "postgresql://vm_user:vm_local_pass@localhost:5432/vm_middleware"
-    tenable_access_key: str = ""
-    tenable_secret_key: str = ""
-    jira_api_token: str = ""
+    database_url: SecretStr = SecretStr(
+        "postgresql://vm_user:vm_local_pass@localhost:5435/vm_middleware"
+    )
+    tenable_access_key: SecretStr = SecretStr("")
+    tenable_secret_key: SecretStr = SecretStr("")
+    jira_api_token: SecretStr = SecretStr("")
     jira_user_email: str = ""
     config_dir: str = "config"
     log_level: str = "INFO"

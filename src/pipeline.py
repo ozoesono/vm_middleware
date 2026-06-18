@@ -340,8 +340,8 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
         logger.info("step_2a_fetching_tagged_assets", tags=config.tenable.tag_filter)
         asset_tags_map = fetch_tagged_assets_with_tags(
             config=config.tenable,
-            access_key=config.settings.tenable_access_key,
-            secret_key=config.settings.tenable_secret_key,
+            access_key=config.settings.tenable_access_key.get_secret_value(),
+            secret_key=config.settings.tenable_secret_key.get_secret_value(),
             tag_names=config.tenable.tag_filter,
         )
         asset_ids = sorted(asset_tags_map.keys())  # deterministic ordering for resume
@@ -362,8 +362,8 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
 
     client = TenableClient(
         config=config.tenable,
-        access_key=config.settings.tenable_access_key,
-        secret_key=config.settings.tenable_secret_key,
+        access_key=config.settings.tenable_access_key.get_secret_value(),
+        secret_key=config.settings.tenable_secret_key.get_secret_value(),
     )
 
     page_size = config.tenable.page_size
@@ -458,8 +458,8 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
     """
     client = TenableClient(
         config=config.tenable,
-        access_key=config.settings.tenable_access_key,
-        secret_key=config.settings.tenable_secret_key,
+        access_key=config.settings.tenable_access_key.get_secret_value(),
+        secret_key=config.settings.tenable_secret_key.get_secret_value(),
     )
 
     page_size = config.tenable.page_size

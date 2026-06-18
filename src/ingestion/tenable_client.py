@@ -91,8 +91,8 @@ class TenableClient:
     """
 
     config: TenableConfig
-    access_key: str
-    secret_key: str
+    access_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
     _http_client: httpx.Client | None = field(default=None, repr=False)
 
     @property

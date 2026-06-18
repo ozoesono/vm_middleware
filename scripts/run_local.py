@@ -114,6 +114,16 @@ def main():
         config.tenable.severity_filter = args.severity
         print(f">>> severity_filter override: {args.severity}")
 
+    # Require Tenable credentials for a real (non-mock) run
+    if not args.mock and not (
+        settings.tenable_access_key.get_secret_value()
+        and settings.tenable_secret_key.get_secret_value()
+    ):
+        sys.exit(
+            "ERROR: TENABLE_ACCESS_KEY and TENABLE_SECRET_KEY must be set in the "
+            "environment (or .env) for a real run. Use --mock to run against fixtures."
+        )
+
     # Initialise DB
     init_db(settings.database_url)
 
