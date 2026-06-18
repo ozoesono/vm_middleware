@@ -154,19 +154,12 @@ def run_pipeline(
       - Resume safety: each page commits before the next page is fetched,
         so a hard stop at any point loses at most one in-flight page.
 
-    Steps:
-        1. Setup or resume a pipeline run
-        2. Sync enrichment data
-        3. Stream findings from Tenable, page by page:
-             - Filter client-side by tag
-             - Stage in DB, commit
-             - Update checkpoint
-        4. Apply enrichment to staged findings
-        5. Reconcile (state transitions, scoring, SLA)
-        6. Mark run complete
+    The flow: set up or resume a run, stream findings from Tenable page by
+    page (staging and checkpointing each page), apply tag and CSV enrichment
+    to the staged rows, reconcile state transitions with scoring and SLA, and
+    mark the run complete. NVD CVE enrichment is decoupled and off by default.
 
-    Args:
-        resume: If True, attempt to resume the most recent incomplete run.
+    Pass start_fresh=True to ignore any incomplete run and start a new one.
     """
     setup_logging(config.settings.log_level)
 
@@ -182,14 +175,14 @@ def run_pipeline(
         )
 
         try:
-            # Step 1: Enrichment sync (skip on resume — already done)
+            # Enrichment sync (skip on resume — already done)
             if not is_resume and enrichment_csv_path:
                 logger.info("step_1_enrichment_sync")
                 count = load_enrichment_from_csv(enrichment_csv_path, session)
                 logger.info("enrichment_loaded", count=count)
                 session.commit()
 
-            # Step 2: Stream Tenable findings (with checkpoint per page)
+            # Stream Tenable findings (with checkpoint per page)
             logger.info("step_2_tenable_ingestion_streaming")
 
             if mock_fixture_path:
@@ -212,7 +205,7 @@ def run_pipeline(
                 _print_summary(run)
                 return run
 
-            # Step 3a: Apply tag-based enrichment from the asset_tags_map (if any)
+            # Apply tag-based enrichment from the asset_tags_map (if any)
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             asset_tags_map = None
             if run.asset_ids_for_run and isinstance(run.asset_ids_for_run, dict):
@@ -228,13 +221,13 @@ def run_pipeline(
                 )
                 session.commit()
 
-            # Step 3b: CSV-based enrichment (manual overrides on top of tag enrichment)
+            # CSV-based enrichment (manual overrides on top of tag enrichment)
             logger.info("step_3b_apply_csv_enrichment")
             apply_enrichment(session, run_id)
             session.commit()
 
-            # Step 4: Reconciliation — runs BEFORE NVD so findings are scored
-            # and reportable without waiting on the (slow) CVE description fetch.
+            # Reconciliation runs before NVD so findings are scored and
+            # reportable without waiting on the slow CVE description fetch.
             logger.info("step_4_scoring_reconciliation")
             recon_stats = reconcile(session, config, run_id)
 
@@ -247,7 +240,7 @@ def run_pipeline(
             run.findings_stale = recon_stats.findings_stale
             session.commit()
 
-            # Step 5: Log Jira queue (not actually called in Phase 0)
+            # Log Jira queue (not actually called in Phase 0)
             actions = (
                 session.query(JiraActionQueue)
                 .filter(JiraActionQueue.run_id == run_id)
@@ -255,10 +248,10 @@ def run_pipeline(
             )
             logger.info("step_5_jira_queue", actions=actions)
 
-            # Step 6: Inline NVD enrichment — OFF by default and BOUNDED.
-            # The findings are already scored + reportable at this point. NVD
-            # only enriches the report Description column. Run the standalone
-            # scripts/enrich_nvd.py to backfill descriptions without blocking.
+            # Inline NVD enrichment is off by default and bounded. Findings are
+            # already scored and reportable here; NVD only fills the report
+            # Description column. Run scripts/enrich_nvd.py to backfill without
+            # blocking.
             if config.nvd.inline_enrichment and config.nvd.max_cves_per_run > 0:
                 logger.info("step_6_inline_nvd_enrichment", max=config.nvd.max_cves_per_run)
                 enrich_unique_cves_for_run(
@@ -273,7 +266,7 @@ def run_pipeline(
                     hint="run scripts/enrich_nvd.py to backfill CVE descriptions",
                 )
 
-            # Step 7: Clean up staging for this run
+            # Clean up staging for this run
             session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
 
             # If some pages were skipped (fetch/stage failures) but ingestion
@@ -478,7 +471,7 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
         consec_failures = 0
 
         while True:
-            # --- Fetch (resilient) ---
+            # Fetch (resilient)
             try:
                 page = client.fetch_page(offset=offset, limit=page_size)
                 consec_failures = 0
@@ -511,7 +504,7 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 run.total_findings_expected = total
                 session.commit()
 
-            # --- Stage (resilient) ---
+            # Stage (resilient)
             saved, skipped, page_failed = _stage_page(session, run_id, page.findings)
 
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()

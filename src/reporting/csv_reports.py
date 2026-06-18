@@ -29,9 +29,7 @@ from src.common.models import CveDetails, Finding
 logger = get_logger("csv_reports")
 
 
-# ---------------------------------------------------------------------------
 # Filtering helper
-# ---------------------------------------------------------------------------
 
 
 def _apply_filters(query, filters: dict[str, Any] | None):
@@ -76,9 +74,7 @@ def _write_csv(rows: list[dict], fieldnames: list[str]) -> str:
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
 # Report: full findings export
-# ---------------------------------------------------------------------------
 
 FINDINGS_COLUMNS = [
     "tenable_finding_id",
@@ -226,9 +222,7 @@ def report_findings(session: Session, filters: dict | None = None) -> str:
     return _write_csv(rows, FINDINGS_COLUMNS)
 
 
-# ---------------------------------------------------------------------------
 # Report: risk summary (risk_rating x portfolio x criticality)
-# ---------------------------------------------------------------------------
 
 
 def report_risk_summary(session: Session, filters: dict | None = None) -> str:
@@ -265,9 +259,7 @@ def report_risk_summary(session: Session, filters: dict | None = None) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
 # Report: SLA breaches / approaching
-# ---------------------------------------------------------------------------
 
 SLA_COLUMNS = [
     "tenable_finding_id", "cve_id", "title", "risk_rating", "risk_score",
@@ -297,9 +289,7 @@ def report_sla_approaching(session: Session, filters: dict | None = None) -> str
     return _write_csv(rows, SLA_COLUMNS)
 
 
-# ---------------------------------------------------------------------------
 # Report: recurrence
-# ---------------------------------------------------------------------------
 
 RECURRENCE_COLUMNS = [
     "tenable_finding_id", "cve_id", "title", "risk_rating", "asset_name",
@@ -319,9 +309,7 @@ def report_recurrence(session: Session, filters: dict | None = None) -> str:
     return _write_csv(rows, RECURRENCE_COLUMNS)
 
 
-# ---------------------------------------------------------------------------
 # Report: portfolio summary
-# ---------------------------------------------------------------------------
 
 
 def report_portfolio_summary(session: Session, filters: dict | None = None) -> str:
@@ -372,9 +360,7 @@ def report_portfolio_summary(session: Session, filters: dict | None = None) -> s
     ])
 
 
-# ---------------------------------------------------------------------------
 # Dispatcher
-# ---------------------------------------------------------------------------
 
 REPORTS = {
     "findings": report_findings,

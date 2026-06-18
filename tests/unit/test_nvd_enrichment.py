@@ -16,9 +16,7 @@ from src.ingestion.nvd_enrichment import (
 from src.reporting import csv_reports
 
 
-# ---------------------------------------------------------------------------
 # Standalone enrichment from the findings table + max_fetch bound
-# ---------------------------------------------------------------------------
 
 
 class TestEnrichFromFindings:
@@ -103,9 +101,7 @@ class TestInlineBound:
         assert cached == 1
 
 
-# ---------------------------------------------------------------------------
 # Parser
-# ---------------------------------------------------------------------------
 
 
 class TestParseNvdResponse:
@@ -156,9 +152,7 @@ class TestParseNvdResponse:
         assert _parse_nvd_response({"vulnerabilities": []}, "CVE-2024-1234") is None
 
 
-# ---------------------------------------------------------------------------
 # Enrichment dispatcher (mocked HTTP)
-# ---------------------------------------------------------------------------
 
 
 class TestEnrichUniqueCvesForRun:
@@ -214,9 +208,7 @@ class TestEnrichUniqueCvesForRun:
         assert count == 0
 
 
-# ---------------------------------------------------------------------------
-# Report — uses NVD data
-# ---------------------------------------------------------------------------
+# Report uses NVD data
 
 
 def _make_finding(session, **kwargs):

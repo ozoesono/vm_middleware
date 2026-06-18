@@ -14,9 +14,7 @@ from src.common.models import FindingStaging, PipelineRun
 from src.ingestion.tenable_ingestion import ingest_findings
 
 
-# ---------------------------------------------------------------------------
 # Per-record fault tolerance
-# ---------------------------------------------------------------------------
 
 
 def _good_finding(fid: str) -> dict:
@@ -97,9 +95,7 @@ class TestIngestResilience:
         assert skipped == 0
 
 
-# ---------------------------------------------------------------------------
 # Auto-resume logic
-# ---------------------------------------------------------------------------
 
 
 def _make_run(session, status, tag_filter=None, **kwargs):
@@ -183,9 +179,7 @@ class TestAutoResume:
         assert start_offset == 0
 
 
-# ---------------------------------------------------------------------------
 # Error append helper
-# ---------------------------------------------------------------------------
 
 
 class TestFetchFailureTolerance:

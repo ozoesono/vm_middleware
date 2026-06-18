@@ -27,9 +27,7 @@ from src.common.logging import get_logger
 logger = get_logger("tenable_client")
 
 
-# ---------------------------------------------------------------------------
 # Exceptions
-# ---------------------------------------------------------------------------
 
 
 class TenableAPIError(Exception):
@@ -51,9 +49,7 @@ class TenableExportTimeoutError(TenableAPIError):
     pass
 
 
-# ---------------------------------------------------------------------------
 # Data classes
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -65,9 +61,7 @@ class TenableFindingsPage:
     limit: int
 
 
-# ---------------------------------------------------------------------------
 # Client
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -121,9 +115,7 @@ class TenableClient:
             self._http_client.close()
             self._http_client = None
 
-    # ------------------------------------------------------------------
     # Shared helpers
-    # ------------------------------------------------------------------
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         """Raise appropriate exception for error status codes."""
@@ -136,10 +128,8 @@ class TenableClient:
         if response.status_code >= 400:
             raise TenableAPIError(response.status_code, response.text[:500])
 
-    # ==================================================================
     # MODE 1: Synchronous Search
     # POST /api/v1/t1/inventory/findings/search
-    # ==================================================================
 
     @retry(
         stop=stop_after_attempt(3),
@@ -262,9 +252,7 @@ class TenableClient:
         logger.info("search_complete", total_findings=len(all_findings))
         return all_findings
 
-    # ==================================================================
     # Server-side filtered fetch by asset_id
-    # ==================================================================
 
     def iter_findings_by_asset_ids(
         self,
@@ -371,10 +359,8 @@ class TenableClient:
             limit=pagination.get("limit", limit),
         )
 
-    # ==================================================================
     # MODE 2: Asynchronous Export
     # POST /api/v1/t1/inventory/export/findings  → poll → download
-    # ==================================================================
 
     @retry(
         stop=stop_after_attempt(3),
@@ -488,18 +474,17 @@ class TenableClient:
 
         Best for: large datasets (50k+ findings).
         """
-        # Step 1: Initiate export
+        # Initiate the export
         export_id = self._initiate_export(filters=filters)
 
-        # Step 2: Poll until complete
+        # Poll until complete
         status_data = self._poll_export_status(
             export_id,
             poll_interval=poll_interval,
             max_wait=max_wait,
         )
 
-        # Step 3: Download all chunks
-        # The status response should contain chunk IDs — extract them
+        # Download all chunks; the status response carries the chunk IDs
         chunks = status_data.get("chunks", [])
         if not chunks:
             # Some API versions use chunks_available or similar
@@ -515,9 +500,7 @@ class TenableClient:
         logger.info("export_complete", export_id=export_id, total_findings=len(all_findings))
         return all_findings
 
-    # ==================================================================
     # Unified entry point
-    # ==================================================================
 
     def fetch_findings(
         self,
@@ -542,9 +525,7 @@ class TenableClient:
             return self.paginate_findings(filters=filters)
 
 
-# ---------------------------------------------------------------------------
 # Mock client for local development / testing
-# ---------------------------------------------------------------------------
 
 
 class MockTenableClient:

@@ -12,9 +12,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
 
-# ---------------------------------------------------------------------------
 # Pydantic settings models
-# ---------------------------------------------------------------------------
 
 
 class CustomScoringConfig(BaseModel):
@@ -165,9 +163,7 @@ class AppSettings(BaseSettings):
     model_config = {"env_prefix": "", "case_sensitive": False}
 
 
-# ---------------------------------------------------------------------------
 # YAML loading
-# ---------------------------------------------------------------------------
 
 
 def _load_yaml(config_dir: str, filename: str) -> dict[str, Any]:
@@ -180,9 +176,7 @@ def _load_yaml(config_dir: str, filename: str) -> dict[str, Any]:
     return data if data else {}
 
 
-# ---------------------------------------------------------------------------
 # Assembled configuration
-# ---------------------------------------------------------------------------
 
 
 class AppConfig:

@@ -23,9 +23,7 @@ from sqlalchemy.dialects.postgresql import JSON, UUID
 from src.common.db import Base
 
 
-# ---------------------------------------------------------------------------
 # Findings
-# ---------------------------------------------------------------------------
 
 
 class Finding(Base):
@@ -144,9 +142,7 @@ class FindingStaging(Base):
     ingested_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
-# ---------------------------------------------------------------------------
 # Enrichment
-# ---------------------------------------------------------------------------
 
 
 class EnrichmentMapping(Base):
@@ -186,9 +182,7 @@ class EnrichmentOverride(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
-# ---------------------------------------------------------------------------
 # Jira
-# ---------------------------------------------------------------------------
 
 
 class JiraActionQueue(Base):
@@ -224,9 +218,7 @@ class JiraSyncLog(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
-# ---------------------------------------------------------------------------
 # Pipeline
-# ---------------------------------------------------------------------------
 
 
 class PipelineRun(Base):
@@ -268,9 +260,7 @@ class PipelineRun(Base):
     pages_failed = Column(Integer, nullable=False, default=0)
 
 
-# ---------------------------------------------------------------------------
 # Exceptions (risk acceptance)
-# ---------------------------------------------------------------------------
 
 
 class CveDetails(Base):

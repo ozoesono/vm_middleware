@@ -50,25 +50,25 @@ def reconcile(
 ) -> ReconciliationStats:
     """Run the full reconciliation process.
 
-    Steps:
-    1. Load all staged findings (current run) into a dict keyed by tenable_finding_id
-    2. Iterate over ALL existing OPEN findings in DB:
-       - If found in staged: update (still open or remediated based on tenable_state)
-       - If NOT found in staged: check stale threshold
-    3. Iterate over staged findings NOT in DB: create new findings
-    4. Apply scoring and SLA to all new/updated findings
-    5. Populate jira_action_queue
+    Staged findings (the current run) are loaded into a lookup keyed by
+    tenable_finding_id. Every existing OPEN/STALE finding is then matched
+    against that lookup: a match is updated (or marked remediated when Tenable
+    reports it fixed), a miss is checked against the stale threshold. Previously
+    remediated findings that reappear are reopened as recurrences. Staged
+    findings with no stored counterpart become new findings. Scoring and SLA
+    are applied to everything new or updated, and the Jira action queue is
+    populated as side effects are detected.
     """
     stats = ReconciliationStats()
 
-    # Step 1: Load staged findings into lookup
+    # Load staged findings into lookup
     staged_findings = session.query(FindingStaging).filter(FindingStaging.run_id == run_id).all()
     staged_lookup: dict[str, FindingStaging] = {sf.tenable_finding_id: sf for sf in staged_findings}
     staged_processed: set[str] = set()
 
     logger.info("reconciliation_start", staged_count=len(staged_lookup), run_id=str(run_id))
 
-    # Step 2: Process existing findings against staged data
+    # Process existing findings against staged data
     existing_findings = session.query(Finding).filter(Finding.state.in_(["OPEN", "STALE"])).all()
 
     for finding in existing_findings:
@@ -80,7 +80,7 @@ def reconcile(
         else:
             _process_missing_finding(finding, config, run_id, stats)
 
-    # Step 2b: Check REMEDIATED findings — recurrence or still fixed
+    # Check REMEDIATED findings: recurrence or still fixed
     remediated_findings = session.query(Finding).filter(Finding.state == "REMEDIATED").all()
     for finding in remediated_findings:
         staged = staged_lookup.get(finding.tenable_finding_id)
@@ -91,7 +91,7 @@ def reconcile(
                 _process_recurrence(finding, staged, config, run_id, session, stats)
             # else: still FIXED — no action needed, just mark as processed
 
-    # Step 3: Create new findings for staged items not in DB
+    # Create new findings for staged items not in DB
     for tenable_id, staged in staged_lookup.items():
         if tenable_id not in staged_processed:
             _process_new_finding(staged, config, run_id, session, stats)
@@ -175,9 +175,7 @@ def _queue_jira_action(
     ))
 
 
-# ---------------------------------------------------------------------------
 # Reconciliation handlers for each case
-# ---------------------------------------------------------------------------
 
 
 def _process_existing_with_staged(
