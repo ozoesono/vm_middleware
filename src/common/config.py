@@ -12,6 +12,35 @@ from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
+def _load_env_file(path: Path) -> None:
+    """Populate os.environ from a .env file for any keys not already set.
+
+    Minimal KEY=VALUE parser: ignores blanks and comments, strips an optional
+    leading 'export ' and surrounding quotes. Real environment variables take
+    precedence — an already-set key is never overwritten — matching how
+    pydantic-settings ranks environment variables above an env file.
+    """
+    if not path.exists():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+# Load the project-root .env (if present) before settings are read. In
+# production (e.g. Lambda) there is no .env, so this is a no-op and the real
+# environment variables (from Secrets Manager) are used instead.
+_load_env_file(Path(__file__).resolve().parents[2] / ".env")
+
+
 # Pydantic settings models
 
 
