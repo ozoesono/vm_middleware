@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from src.common.config import AppConfig
 from src.common.logging import get_logger
-from src.common.models import Finding, FindingStaging, JiraActionQueue
+from src.common.models import Finding, FindingStaging, JiraActionQueue, PipelineRun
 from src.ingestion.enrichment import CRITICALITY_SCORES
 from src.scoring.engine import score_finding
 from src.scoring.sla import calculate_sla_due_date, determine_sla_status
@@ -66,10 +66,33 @@ def reconcile(
     staged_lookup: dict[str, FindingStaging] = {sf.tenable_finding_id: sf for sf in staged_findings}
     staged_processed: set[str] = set()
 
-    logger.info("reconciliation_start", staged_count=len(staged_lookup), run_id=str(run_id))
+    # Confine stale-detection to what this run actually looked at:
+    #   - scoped_asset_ids: a tag-filtered run only pulled a subset of assets,
+    #     so it must not age out findings on assets it never touched.
+    #   - allow_stale: an empty staged set means the pull returned nothing
+    #     (failed or empty scope), not that every finding disappeared — so age
+    #     nothing out. Without these guards a 0-finding run would mark an
+    #     entire portfolio STALE.
+    scoped_asset_ids = _run_asset_scope(session, run_id)
+    allow_stale = len(staged_lookup) > 0
 
-    # Process existing findings against staged data
-    existing_findings = session.query(Finding).filter(Finding.state.in_(["OPEN", "STALE"])).all()
+    logger.info(
+        "reconciliation_start",
+        staged_count=len(staged_lookup),
+        run_id=str(run_id),
+        scoped=scoped_asset_ids is not None,
+        stale_enabled=allow_stale,
+    )
+    if not allow_stale:
+        logger.warning("stale_detection_skipped_empty_staged", run_id=str(run_id))
+
+    # Process existing findings against staged data, scoping the query to this
+    # run's assets when the run is scoped (so we neither load nor stale
+    # out-of-scope findings).
+    existing_q = session.query(Finding).filter(Finding.state.in_(["OPEN", "STALE"]))
+    if scoped_asset_ids is not None:
+        existing_q = existing_q.filter(Finding.tenable_asset_id.in_(list(scoped_asset_ids)))
+    existing_findings = existing_q.all()
 
     for finding in existing_findings:
         staged = staged_lookup.get(finding.tenable_finding_id)
@@ -77,7 +100,7 @@ def reconcile(
         if staged is not None:
             staged_processed.add(finding.tenable_finding_id)
             _process_existing_with_staged(finding, staged, config, run_id, session, stats)
-        else:
+        elif allow_stale:
             _process_missing_finding(finding, config, run_id, stats)
 
     # Check REMEDIATED findings: recurrence or still fixed
@@ -108,6 +131,26 @@ def reconcile(
         run_id=str(run_id),
     )
     return stats
+
+
+def _run_asset_scope(session: Session, run_id: uuid.UUID) -> set[str] | None:
+    """Return the set of asset_ids this run pulled, or None for a full run.
+
+    Tag-filtered runs persist their asset list on the PipelineRun; stale
+    detection must be confined to those assets. A run with no stored asset
+    scope (a full/unfiltered run, or no run record) covers all assets.
+    """
+    run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
+    if run is None or not run.asset_ids_for_run:
+        return None
+    stored = run.asset_ids_for_run
+    if isinstance(stored, dict):
+        ids = stored.get("ids") or []
+    elif isinstance(stored, list):
+        ids = stored
+    else:
+        return None
+    return set(ids)
 
 
 def _extract_enrichment(staged: FindingStaging) -> dict:

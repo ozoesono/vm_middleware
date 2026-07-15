@@ -7,7 +7,7 @@ import pytest
 
 from src.common.config import AppConfig, AppSettings
 from src.common.db import Base
-from src.common.models import Finding, FindingStaging, JiraActionQueue
+from src.common.models import Finding, FindingStaging, JiraActionQueue, PipelineRun
 from src.reconciliation.reconciler import reconcile
 
 
@@ -137,12 +137,13 @@ class TestReconciliation:
         assert action.action == "REOPEN"
 
     def test_stale(self, db_session, config, run_id):
-        """A finding in DB but NOT in staging, past stale threshold = STALE."""
+        """A finding missing from a non-empty scan, past stale threshold = STALE."""
         old_last_seen = datetime.now() - timedelta(days=config.tenable.stale_threshold_days + 1)
         self._make_finding(
             db_session, tenable_finding_id="f-stale", last_seen=old_last_seen
         )
-        # No staged finding for f-stale
+        # The scan returned data (just not this finding), so staging is non-empty.
+        self._make_staged(db_session, run_id, tenable_finding_id="f-other")
 
         stats = reconcile(db_session, config, run_id)
 
@@ -152,17 +153,60 @@ class TestReconciliation:
         assert finding.state == "STALE"
 
     def test_not_stale_if_within_threshold(self, db_session, config, run_id):
-        """A finding missing from staging but within threshold is NOT marked stale."""
+        """A finding missing from a non-empty scan but within threshold is NOT stale."""
         recent_last_seen = datetime.now() - timedelta(days=1)
         self._make_finding(
             db_session, tenable_finding_id="f-recent", last_seen=recent_last_seen
         )
+        self._make_staged(db_session, run_id, tenable_finding_id="f-other")
 
         stats = reconcile(db_session, config, run_id)
 
         assert stats.findings_stale == 0
         finding = db_session.query(Finding).filter_by(tenable_finding_id="f-recent").first()
         assert finding.state == "OPEN"
+
+    def test_empty_pull_does_not_stale(self, db_session, config, run_id):
+        """An empty scan (0 findings staged) must NOT age out existing findings.
+
+        Reproduces the incident where a run that fetched 0 findings marked an
+        entire portfolio STALE.
+        """
+        old = datetime.now() - timedelta(days=config.tenable.stale_threshold_days + 5)
+        self._make_finding(db_session, tenable_finding_id="f-1", last_seen=old)
+        self._make_finding(db_session, tenable_finding_id="f-2", last_seen=old)
+        # No staged findings at all — the pull returned nothing.
+
+        stats = reconcile(db_session, config, run_id)
+
+        assert stats.findings_stale == 0
+        assert db_session.query(Finding).filter_by(state="STALE").count() == 0
+        assert db_session.query(Finding).filter_by(state="OPEN").count() == 2
+
+    def test_scoped_run_does_not_stale_out_of_scope(self, db_session, config, run_id):
+        """A tag-scoped run must only stale findings on the assets it pulled."""
+        db_session.add(PipelineRun(
+            id=run_id,
+            started_at=datetime.now(),
+            status="RUNNING",
+            asset_ids_for_run={"ids": ["asset-A"], "tags": {}},
+        ))
+        old = datetime.now() - timedelta(days=config.tenable.stale_threshold_days + 5)
+        # In scope, missing from this run's scan -> STALE
+        self._make_finding(db_session, tenable_finding_id="f-a-gone",
+                           tenable_asset_id="asset-A", last_seen=old)
+        # Out of scope (an asset this run never pulled) -> must stay OPEN
+        self._make_finding(db_session, tenable_finding_id="f-b-safe",
+                           tenable_asset_id="asset-B", last_seen=old)
+        # Something WAS returned for asset-A, so staging is non-empty
+        self._make_staged(db_session, run_id, tenable_finding_id="f-a-present",
+                          tenable_asset_id="asset-A")
+
+        stats = reconcile(db_session, config, run_id)
+
+        assert stats.findings_stale == 1
+        assert db_session.query(Finding).filter_by(tenable_finding_id="f-a-gone").first().state == "STALE"
+        assert db_session.query(Finding).filter_by(tenable_finding_id="f-b-safe").first().state == "OPEN"
 
     def test_multiple_findings_mixed(self, db_session, config, run_id):
         """Test a mix of new, updated, remediated, and stale findings."""
