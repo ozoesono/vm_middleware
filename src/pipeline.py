@@ -26,6 +26,7 @@ from src.ingestion.tenable_ingestion import (
     filter_by_tags,
     ingest_findings,
 )
+from src.maintenance.retention import reap_stale_runs
 from src.reconciliation.reconciler import reconcile
 
 logger = get_logger("pipeline")
@@ -87,6 +88,12 @@ def _setup_or_resume_run(
     Returns:
         (run_id, start_offset, is_resume)
     """
+    # Reap abandoned RUNNING runs first, so a corpse can neither hijack
+    # auto-resume below nor keep reporting an ever-growing duration.
+    reaped = reap_stale_runs(session, config.maintenance.run_timeout_hours)
+    if reaped:
+        logger.warning("reaped_abandoned_runs", count=len(reaped), run_ids=[r["id"] for r in reaped])
+
     if not start_fresh:
         prev = (
             session.query(PipelineRun)

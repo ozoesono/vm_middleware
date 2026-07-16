@@ -173,6 +173,17 @@ class NvdConfig(BaseModel):
     max_cves_per_run: int = 0  # bound for inline mode (0 = none inline)
 
 
+class MaintenanceConfig(BaseModel):
+    """Housekeeping thresholds for run reaping and data retention.
+
+    run_timeout_hours bounds how long a RUNNING pipeline run may go without
+    committing progress before it is treated as abandoned (the process died)
+    and reaped to TIMED_OUT. Keyed off the run's last progress, not its total
+    duration, so a long-but-live run is never falsely reaped.
+    """
+    run_timeout_hours: int = 6
+
+
 class JiraConfig(BaseModel):
     base_url: str = "https://org.atlassian.net"
     default_project: str = "VULN"
@@ -250,6 +261,9 @@ class AppConfig:
 
         nvd_data = _load_yaml(config_dir, "nvd.yaml").get("nvd", {})
         self.nvd = NvdConfig(**nvd_data)
+
+        maintenance_data = _load_yaml(config_dir, "maintenance.yaml").get("maintenance", {})
+        self.maintenance = MaintenanceConfig(**maintenance_data)
 
 
 @lru_cache()

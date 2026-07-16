@@ -1,0 +1,6 @@
+maintenance:
+  # A RUNNING pipeline run that commits no progress for longer than this is
+  # treated as abandoned (its process died) and reaped to TIMED_OUT on the next
+  # pipeline start. Keyed off last progress, not total duration, so a genuinely
+  # long-running-but-alive run is never falsely reaped.
+  run_timeout_hours: 6

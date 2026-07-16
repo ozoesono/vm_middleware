@@ -259,6 +259,13 @@ class PipelineRun(Base):
     findings_skipped = Column(Integer, nullable=False, default=0)
     pages_failed = Column(Integer, nullable=False, default=0)
 
+    # Heartbeat: bumped on every checkpoint commit (onupdate). Used to detect
+    # abandoned RUNNING runs — a run whose process died leaves this frozen, so
+    # staleness here (not total duration) is what the reaper keys off.
+    updated_at = Column(
+        DateTime, nullable=True, server_default=func.now(), onupdate=func.now()
+    )
+
 
 # Exceptions (risk acceptance)
 
