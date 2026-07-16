@@ -135,6 +135,10 @@ class TenableConfig(BaseModel):
     # are kept. None = no filter (keep everything). Filtering happens after
     # ingestion because the Tenable Inventory API doesn't reliably accept tag filters.
     tag_filter: list[str] | None = None
+    # Drop findings whose asset_name contains any of these substrings
+    # (case-insensitive). Used to exclude ephemeral CI build images, which are
+    # intermediate artifacts rather than deployed workloads.
+    exclude_asset_patterns: list[str] = Field(default_factory=list)
     stale_threshold_days: int = 7
     request_timeout_seconds: int = 120
     max_retries: int = 3

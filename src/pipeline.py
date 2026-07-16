@@ -46,7 +46,7 @@ def _append_error(run: PipelineRun, message: str, max_kept: int = 50) -> None:
     run.errors = errs
 
 
-def _stage_page(session, run_id: uuid.UUID, findings: list) -> tuple[int, int, bool]:
+def _stage_page(session, run_id: uuid.UUID, findings: list, exclude_patterns: list | None = None) -> tuple[int, int, bool]:
     """Stage one page's findings resiliently.
 
     ingest_findings already does per-record fault tolerance internally.
@@ -60,6 +60,7 @@ def _stage_page(session, run_id: uuid.UUID, findings: list) -> tuple[int, int, b
             findings, run_id, session,
             tag_filter=None,
             clear_staging=False,
+            exclude_asset_patterns=exclude_patterns,
         )
         return saved, skipped, False
     except Exception as e:
@@ -403,7 +404,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
                 if batch_total is None:
                     batch_total = page.total
 
-                saved, skipped, page_failed = _stage_page(session, run_id, page.findings)
+                saved, skipped, page_failed = _stage_page(session, run_id, page.findings, config.tenable.exclude_asset_patterns)
                 batch_saved += saved
                 batch_skipped += skipped
                 if page_failed:
@@ -549,7 +550,10 @@ def _run_mock(session, config, run_id: uuid.UUID, fixture_path: str) -> None:
         session.commit()
 
         kept = filter_by_tags(raw_findings, config.tenable.tag_filter)
-        saved, skipped = ingest_findings(kept, run_id, session, tag_filter=None)
+        saved, skipped = ingest_findings(
+            kept, run_id, session, tag_filter=None,
+            exclude_asset_patterns=config.tenable.exclude_asset_patterns,
+        )
         run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
         run.findings_skipped = (run.findings_skipped or 0) + skipped
         session.commit()

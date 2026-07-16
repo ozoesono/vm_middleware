@@ -29,6 +29,15 @@ tenable:
   # Example: ["Portfolio-Business-Growth", "Portfolio-Payments"]
   tag_filter: null
 
+  # Drop findings whose asset_name contains any of these substrings (case-insensitive).
+  # Ephemeral CI build images (per-build ECR tags like ":build-<hash>" or
+  # ":branch-<name>") are intermediate artifacts, not deployed workloads, and
+  # dominate finding volume. Excluding them keeps the programme focused on
+  # running assets. Empty list = keep everything.
+  exclude_asset_patterns:
+    - ":build-"
+    - ":branch-"
+
   # Days before a missing finding is marked STALE (not auto-closed)
   stale_threshold_days: 7
 

@@ -249,6 +249,43 @@ def filter_by_asset_ids(
     return kept
 
 
+def filter_by_exclude_patterns(
+    findings: list[dict[str, Any]],
+    patterns: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Drop findings whose asset_name contains any exclude pattern.
+
+    Case-insensitive substring match. Used to keep ephemeral CI build images
+    (per-build ECR tags like ":build-<hash>") out of the programme — they are
+    intermediate artifacts, not deployed workloads, and dominate volume.
+    """
+    if not patterns:
+        return findings
+    pats = [p.lower() for p in patterns if p]
+    if not pats:
+        return findings
+
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for f in findings:
+        extra = f.get("extra_properties", {}) or {}
+        name = (extra.get("asset_name") or "").lower()
+        if name and any(p in name for p in pats):
+            dropped += 1
+            continue
+        kept.append(f)
+
+    if dropped:
+        logger.info(
+            "exclude_pattern_filter_applied",
+            patterns=patterns,
+            before=len(findings),
+            after=len(kept),
+            dropped=dropped,
+        )
+    return kept
+
+
 def ingest_findings(
     findings: list[dict[str, Any]],
     run_id: uuid.UUID,
@@ -256,6 +293,7 @@ def ingest_findings(
     batch_size: int = 500,
     tag_filter: list[str] | None = None,
     clear_staging: bool = True,
+    exclude_asset_patterns: list[str] | None = None,
 ) -> tuple[int, int]:
     """Normalise and insert findings into the staging table.
 
@@ -272,6 +310,9 @@ def ingest_findings(
     """
     if tag_filter:
         findings = filter_by_tags(findings, tag_filter)
+
+    if exclude_asset_patterns:
+        findings = filter_by_exclude_patterns(findings, exclude_asset_patterns)
 
     if clear_staging:
         session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
