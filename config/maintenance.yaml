@@ -4,3 +4,8 @@ maintenance:
   # pipeline start. Keyed off last progress, not total duration, so a genuinely
   # long-running-but-alive run is never falsely reaped.
   run_timeout_hours: 6
+
+  # STALE findings last seen longer ago than this are eligible for deletion by
+  # scripts/maintenance.py --prune-stale. REMEDIATED findings are never pruned —
+  # they are retained indefinitely as audit evidence.
+  stale_retention_days: 180

@@ -176,12 +176,16 @@ class NvdConfig(BaseModel):
 class MaintenanceConfig(BaseModel):
     """Housekeeping thresholds for run reaping and data retention.
 
-    run_timeout_hours bounds how long a RUNNING pipeline run may go without
-    committing progress before it is treated as abandoned (the process died)
-    and reaped to TIMED_OUT. Keyed off the run's last progress, not its total
-    duration, so a long-but-live run is never falsely reaped.
+    - run_timeout_hours bounds how long a RUNNING pipeline run may go without
+      committing progress before it is treated as abandoned (the process died)
+      and reaped to TIMED_OUT. Keyed off the run's last progress, not its total
+      duration, so a long-but-live run is never falsely reaped.
+    - stale_retention_days bounds how long a STALE finding is kept before the
+      prune job removes it, keyed off when it was last seen. REMEDIATED history
+      is never pruned (audit evidence).
     """
     run_timeout_hours: int = 6
+    stale_retention_days: int = 180
 
 
 class JiraConfig(BaseModel):

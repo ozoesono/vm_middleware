@@ -1,11 +1,11 @@
-"""Tests for maintenance operations: reaping abandoned runs."""
+"""Tests for maintenance operations: reaping abandoned runs, pruning STALE."""
 
 import uuid
 from datetime import datetime, timedelta
 
 from src.common.config import AppConfig, AppSettings
-from src.common.models import PipelineRun
-from src.maintenance.retention import reap_stale_runs
+from src.common.models import Finding, PipelineRun
+from src.maintenance.retention import prune_stale_findings, reap_stale_runs
 
 
 def _make_run(session, status, started_at, updated_at, tag_filter=None):
@@ -124,3 +124,69 @@ class TestReapIntegratedWithSetup:
         assert start_offset == 0
         assert run_id != zombie.id
         assert zombie.status == "TIMED_OUT"
+
+
+def _make_finding(session, state, last_seen, tid=None, updated_at=None):
+    f = Finding(
+        id=uuid.uuid4(),
+        tenable_finding_id=tid or f"f-{uuid.uuid4()}",
+        title="CVE-2024-0001",
+        severity="HIGH",
+        state=state,
+        last_seen=last_seen,
+        updated_at=updated_at,
+    )
+    session.add(f)
+    session.flush()
+    return f
+
+
+class TestPruneStaleFindings:
+    NOW = datetime(2026, 7, 16, 12, 0, 0)
+
+    def _seed(self, session):
+        return {
+            "old_stale": _make_finding(session, "STALE", self.NOW - timedelta(days=200)),
+            "recent_stale": _make_finding(session, "STALE", self.NOW - timedelta(days=30)),
+            "old_remediated": _make_finding(session, "REMEDIATED", self.NOW - timedelta(days=400)),
+            "old_open": _make_finding(session, "OPEN", self.NOW - timedelta(days=400)),
+        }
+
+    def test_dry_run_counts_but_deletes_nothing(self, db_session):
+        self._seed(db_session)
+        result = prune_stale_findings(db_session, retention_days=180, dry_run=True, now=self.NOW)
+
+        assert result["total_stale"] == 2
+        assert result["eligible"] == 1  # only old_stale
+        assert result["deleted"] == 0
+        assert db_session.query(Finding).count() == 4  # nothing removed
+
+    def test_apply_deletes_only_aged_stale(self, db_session):
+        seed = self._seed(db_session)
+        result = prune_stale_findings(db_session, retention_days=180, dry_run=False, now=self.NOW)
+
+        assert result["eligible"] == 1
+        assert result["deleted"] == 1
+        remaining_ids = {f.id for f in db_session.query(Finding).all()}
+        assert seed["old_stale"].id not in remaining_ids
+        # recent STALE, and old REMEDIATED/OPEN are all retained
+        assert seed["recent_stale"].id in remaining_ids
+        assert seed["old_remediated"].id in remaining_ids
+        assert seed["old_open"].id in remaining_ids
+
+    def test_remediated_never_pruned_even_when_ancient(self, db_session):
+        _make_finding(db_session, "REMEDIATED", self.NOW - timedelta(days=3650))
+        result = prune_stale_findings(db_session, retention_days=180, dry_run=False, now=self.NOW)
+
+        assert result["eligible"] == 0
+        assert result["deleted"] == 0
+        assert db_session.query(Finding).count() == 1
+
+    def test_falls_back_to_updated_at_when_last_seen_null(self, db_session):
+        _make_finding(
+            db_session, "STALE", last_seen=None,
+            updated_at=self.NOW - timedelta(days=300),
+        )
+        result = prune_stale_findings(db_session, retention_days=180, dry_run=False, now=self.NOW)
+
+        assert result["deleted"] == 1

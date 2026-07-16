@@ -1,4 +1,6 @@
-"""Maintenance: reap abandoned pipeline runs.
+"""Maintenance: reap abandoned pipeline runs, prune aged STALE findings.
+
+Two independent housekeeping operations, both safe to run repeatedly.
 
 reap_stale_runs
     A RUNNING run whose process died never sets a terminal status or
@@ -11,16 +13,23 @@ reap_stale_runs
     run's last progress (updated_at), not its start, so a genuinely
     long-running-but-live run — which keeps committing checkpoints — is never
     reaped.
+
+prune_stale_findings
+    STALE findings accumulate as assets churn (historically the container
+    build-image churn drove the table to millions of rows). A finding not seen
+    for stale_retention_days is aged out. REMEDIATED findings are never
+    touched — they are audit evidence and kept indefinitely.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
-from src.common.models import PipelineRun
+from src.common.models import Finding, PipelineRun
 
 logger = get_logger("maintenance")
 
@@ -107,3 +116,54 @@ def reap_stale_runs(
     if not dry_run and reaped:
         session.flush()
     return reaped
+
+
+def prune_stale_findings(
+    session: Session,
+    retention_days: int,
+    dry_run: bool = True,
+    now: datetime | None = None,
+) -> dict:
+    """Delete STALE findings not seen for longer than retention_days.
+
+    Age is taken from last_seen, falling back to updated_at then created_at so
+    a finding with no observation timestamp is never deleted on a NULL. Only
+    state == 'STALE' rows are eligible; REMEDIATED findings are retained
+    indefinitely as audit evidence. The delete is a single set-based statement
+    (no rows loaded into memory), so it scales to a multi-million-row table.
+
+    Returns a summary dict. When not a dry run the delete is executed within the
+    caller's transaction (not committed here). Defaults to dry_run=True — a
+    destructive op should not fire by accident.
+    """
+    now = now or _utcnow()
+    cutoff = now - timedelta(days=retention_days)
+    last_activity = func.coalesce(Finding.last_seen, Finding.updated_at, Finding.created_at)
+
+    total_stale = session.query(Finding).filter(Finding.state == "STALE").count()
+    eligible_q = session.query(Finding).filter(
+        Finding.state == "STALE",
+        last_activity < cutoff,
+    )
+    eligible = eligible_q.count()
+
+    deleted = 0
+    if not dry_run and eligible:
+        deleted = eligible_q.delete(synchronize_session=False)
+
+    logger.info(
+        "stale_findings_pruned" if not dry_run else "stale_findings_prune_preview",
+        retention_days=retention_days,
+        cutoff=cutoff.isoformat(),
+        total_stale=total_stale,
+        eligible=eligible,
+        deleted=deleted,
+    )
+    return {
+        "retention_days": retention_days,
+        "cutoff": cutoff.isoformat(),
+        "total_stale": total_stale,
+        "eligible": eligible,
+        "deleted": deleted,
+        "dry_run": dry_run,
+    }
