@@ -11,6 +11,7 @@ Available reports:
     sla-approaching       Findings approaching their SLA deadline
     recurrence            Findings that resurfaced after remediation
     portfolio-summary     Per-portfolio rollup (totals, breaches, avg risk)
+    workstream-summary    Open/stale split by container / host-CVE / cloud-misconfig
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import io
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, false, func, or_
 from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
@@ -360,6 +361,85 @@ def report_portfolio_summary(session: Session, filters: dict | None = None) -> s
     ])
 
 
+# Report: workstream summary (container / host-CVE / cloud-misconfig)
+
+DEFAULT_CONTAINER_PATTERNS = [
+    ".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "quay.io/",
+    "registry.k8s.io/", "public.ecr.aws/", "mcr.microsoft.com/",
+]
+
+WORKSTREAM_CONTAINER = "container_image"
+WORKSTREAM_HOST_CVE = "host_cve"
+WORKSTREAM_MISCONFIG = "cloud_misconfig"
+
+
+def classify_workstream(
+    asset_name: str | None,
+    cve_id: str | None,
+    container_patterns: list[str] | None = None,
+) -> str:
+    """Bucket a finding into a remediation workstream.
+
+    container_image  — a container image (any registry); fix by rebuilding on a
+                       patched base image.
+    host_cve         — a CVE on a non-container asset (host/VM); patch the host.
+    cloud_misconfig  — a non-container finding with no CVE; a configuration issue.
+    """
+    patterns = container_patterns or DEFAULT_CONTAINER_PATTERNS
+    name = (asset_name or "").lower()
+    if name and any(p.lower() in name for p in patterns):
+        return WORKSTREAM_CONTAINER
+    return WORKSTREAM_HOST_CVE if cve_id else WORKSTREAM_MISCONFIG
+
+
+def report_workstream_summary(
+    session: Session,
+    filters: dict | None = None,
+    container_patterns: list[str] | None = None,
+) -> str:
+    """Open/stale counts split by remediation workstream.
+
+    Container images are detected by registry substring (not just ECR), so
+    Docker Hub / GHCR / GCR images are counted correctly. Non-container
+    findings split into host CVEs (patchable) and cloud misconfigurations.
+    """
+    patterns = container_patterns or DEFAULT_CONTAINER_PATTERNS
+    conds = [Finding.asset_name.ilike(f"%{p}%") for p in patterns if p]
+    container_cond = or_(*conds) if conds else false()
+
+    workstream = case(
+        (container_cond, WORKSTREAM_CONTAINER),
+        (Finding.cve_id.isnot(None), WORKSTREAM_HOST_CVE),
+        else_=WORKSTREAM_MISCONFIG,
+    )
+
+    q = _apply_filters(
+        session.query(
+            workstream.label("workstream"),
+            func.sum(case((Finding.state == "OPEN", 1), else_=0)).label("open_findings"),
+            func.sum(case((Finding.state == "STALE", 1), else_=0)).label("stale_findings"),
+            func.count(func.distinct(Finding.tenable_asset_id)).label("distinct_assets"),
+        ),
+        filters,
+    ).group_by(workstream)
+
+    order = {WORKSTREAM_CONTAINER: 0, WORKSTREAM_HOST_CVE: 1, WORKSTREAM_MISCONFIG: 2}
+    rows = []
+    for r in q.all():
+        rows.append({
+            "workstream": r.workstream,
+            "open_findings": int(r.open_findings or 0),
+            "stale_findings": int(r.stale_findings or 0),
+            "distinct_assets": int(r.distinct_assets or 0),
+        })
+    rows.sort(key=lambda x: order.get(x["workstream"], 9))
+
+    logger.info("report_workstream_summary_generated", rows=len(rows))
+    return _write_csv(
+        rows, ["workstream", "open_findings", "stale_findings", "distinct_assets"]
+    )
+
+
 # Dispatcher
 
 REPORTS = {
@@ -369,14 +449,22 @@ REPORTS = {
     "sla-approaching": report_sla_approaching,
     "recurrence": report_recurrence,
     "portfolio-summary": report_portfolio_summary,
+    "workstream-summary": report_workstream_summary,
 }
 
 
-def generate(session: Session, report_name: str, filters: dict | None = None) -> str:
+def generate(
+    session: Session,
+    report_name: str,
+    filters: dict | None = None,
+    container_patterns: list[str] | None = None,
+) -> str:
     """Generate a named report and return the CSV string."""
     fn = REPORTS.get(report_name)
     if fn is None:
         raise ValueError(
             f"Unknown report '{report_name}'. Available: {sorted(REPORTS)}"
         )
+    if report_name == "workstream-summary":
+        return fn(session, filters, container_patterns)
     return fn(session, filters)

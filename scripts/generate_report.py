@@ -29,7 +29,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.common.config import AppSettings
+from src.common.config import AppConfig, AppSettings
 from src.common.db import get_session, init_db
 from src.reporting import csv_reports
 
@@ -73,11 +73,15 @@ def main():
             filters[key] = val
 
     settings = AppSettings()
+    config = AppConfig(settings=settings)
     init_db(settings.database_url)
 
     with get_session() as session:
         try:
-            output = csv_reports.generate(session, args.report, filters or None)
+            output = csv_reports.generate(
+                session, args.report, filters or None,
+                container_patterns=config.tenable.container_registry_patterns,
+            )
         except ValueError as e:
             parser.error(str(e))
 

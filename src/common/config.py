@@ -139,6 +139,15 @@ class TenableConfig(BaseModel):
     # (case-insensitive). Used to exclude ephemeral CI build images, which are
     # intermediate artifacts rather than deployed workloads.
     exclude_asset_patterns: list[str] = Field(default_factory=list)
+    # Registry substrings that identify a container image (case-insensitive).
+    # Container images come from many registries, not just ECR — used to
+    # classify findings into container / host-CVE / cloud-misconfig workstreams.
+    container_registry_patterns: list[str] = Field(
+        default_factory=lambda: [
+            ".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "quay.io/",
+            "registry.k8s.io/", "public.ecr.aws/", "mcr.microsoft.com/",
+        ]
+    )
     stale_threshold_days: int = 7
     request_timeout_seconds: int = 120
     max_retries: int = 3
