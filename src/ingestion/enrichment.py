@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
 from src.common.models import EnrichmentMapping, FindingStaging
-from src.common.tag_parser import CATEGORY_TO_FIELD, parse_tags
+from src.common.tag_parser import CATEGORY_TO_FIELD, collapse_tag_variants, parse_tags
 
 logger = get_logger("enrichment")
 
@@ -106,6 +106,7 @@ def apply_asset_tags_enrichment(
     asset_tags_map: dict[str, list[str]] | None,
     criticality_scores: dict[str, float],
     default_criticality_score: float,
+    logical_tags: list[str] | None = None,
 ) -> int:
     """Enrich staged findings using a pre-fetched asset_id → tag_names map.
 
@@ -137,6 +138,7 @@ def apply_asset_tags_enrichment(
         if not tag_names:
             continue
 
+        tag_names = collapse_tag_variants(tag_names, logical_tags)
         parsed_dict, _ = parse_tags(tag_names)
 
         # Build the enrichment payload from parsed tags
@@ -180,11 +182,17 @@ def apply_asset_tags_enrichment(
     return enriched
 
 
-def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
+def apply_enrichment(
+    session: Session,
+    run_id: uuid.UUID,
+    logical_tags: list[str] | None = None,
+) -> int:
     """Apply enrichment data to staged findings.
 
     Matches staged findings against enrichment_mappings by asset_name or asset_id
-    and updates the staging records with business context.
+    and updates the staging records with business context. logical_tags is the
+    run's --tag filter, used to collapse account-split tag variants back to their
+    logical tag before parsing.
 
     Returns the number of findings enriched.
     """
@@ -207,7 +215,7 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
 
     for sf in staged_findings:
         # Start by extracting whatever we can from Tenable tags (lower priority)
-        tag_enrichment = _extract_tag_enrichment(sf)
+        tag_enrichment = _extract_tag_enrichment(sf, logical_tags)
         if tag_enrichment.get("_invalid_count", 0) > 0:
             invalid_tag_count += tag_enrichment.pop("_invalid_count")
 
@@ -248,12 +256,13 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
     return enriched_count
 
 
-def _extract_tag_enrichment(sf: FindingStaging) -> dict:
+def _extract_tag_enrichment(sf: FindingStaging, logical_tags: list[str] | None = None) -> dict:
     """Extract enrichment data from a staging finding's Tenable tags.
 
     Parses tag_names using the taxonomy parser. Returns a dict of the
     enrichment fields that could be populated from tags. Logs warnings
-    for any tags that don't conform to the taxonomy.
+    for any tags that don't conform to the taxonomy. logical_tags collapses
+    account-split variants (Tag-Name-1/-2) back to the logical tag first.
     """
     if not sf.tenable_tags or not isinstance(sf.tenable_tags, dict):
         return {}
@@ -262,6 +271,7 @@ def _extract_tag_enrichment(sf: FindingStaging) -> dict:
     if not tag_names:
         return {}
 
+    tag_names = collapse_tag_variants(tag_names, logical_tags)
     parsed_dict, all_parsed = parse_tags(tag_names)
 
     enrichment: dict = {}

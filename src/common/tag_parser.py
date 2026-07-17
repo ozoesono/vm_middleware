@@ -154,6 +154,48 @@ def parse_tags(tag_names: list[str]) -> tuple[dict[str, str], list[ParsedTag]]:
     return parsed_dict, all_parsed
 
 
+def collapse_tag_variants(
+    tag_names: list[str], logical_tags: list[str] | None
+) -> list[str]:
+    """Collapse account-split tag variants back to their logical tag.
+
+    Tenable caps a tag at 5 AWS accounts, so a logical tag spanning more accounts
+    is stored as <logical>-1, <logical>-2, … Given the logical tags the run
+    filtered on, rewrite any '<logical>-<int>' tag back to '<logical>' so
+    enrichment treats every variant as the one logical tag (e.g. the Portfolio
+    stays 'Data-Services', not 'Data-Services-2').
+
+    Only an exact '<logical>-<digits>' match collapses, and only for a logical
+    tag that was an explicit filter input — so a legitimate value ending in a
+    number (e.g. 'Region-eu-west-2') is never touched. Order is preserved and
+    duplicates produced by the collapse are removed.
+    """
+    if not logical_tags or not tag_names:
+        return tag_names
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for tag in tag_names:
+        collapsed = _collapse_one_tag(tag, logical_tags)
+        if collapsed not in seen:
+            seen.add(collapsed)
+            result.append(collapsed)
+    return result
+
+
+def _collapse_one_tag(tag: str, logical_tags: list[str]) -> str:
+    """Return the logical tag if `tag` is one of its numbered variants, else `tag`."""
+    if not isinstance(tag, str):
+        return tag
+    for logical in logical_tags:
+        prefix = f"{logical}-"
+        if tag.startswith(prefix):
+            suffix = tag[len(prefix):]
+            if suffix.isdigit():
+                return logical
+    return tag
+
+
 # Mapping from Tenable tag category → enrichment_mappings field name.
 # This lets the enrichment engine populate the canonical model from tags.
 CATEGORY_TO_FIELD = {

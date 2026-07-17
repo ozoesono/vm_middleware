@@ -226,12 +226,13 @@ def run_pipeline(
                     asset_tags_map=asset_tags_map,
                     criticality_scores=config.scoring.criticality_scores,
                     default_criticality_score=config.scoring.default_criticality_score,
+                    logical_tags=config.tenable.tag_filter,
                 )
                 session.commit()
 
             # CSV-based enrichment (manual overrides on top of tag enrichment)
             logger.info("step_3b_apply_csv_enrichment")
-            apply_enrichment(session, run_id)
+            apply_enrichment(session, run_id, logical_tags=config.tenable.tag_filter)
             session.commit()
 
             # Reconciliation runs before NVD so findings are scored and
