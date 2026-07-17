@@ -146,6 +146,7 @@ class TenableConfig(BaseModel):
         default_factory=lambda: [
             ".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "quay.io/",
             "registry.k8s.io/", "public.ecr.aws/", "mcr.microsoft.com/",
+            "container-registry.oracle.com/",
         ]
     )
     stale_threshold_days: int = 7

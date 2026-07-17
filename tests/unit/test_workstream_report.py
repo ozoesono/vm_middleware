@@ -20,6 +20,9 @@ def test_classify_container_across_registries():
         "ghcr.io/org/app:latest",
         "us.gcr.io/proj/app:1",
         "quay.io/org/app:1",
+        "registry.k8s.io/kube-proxy:v1.29.0",
+        "public.ecr.aws/lambda/python:3.12",
+        "container-registry.oracle.com/database/enterprise:19.3.0",
     ):
         assert classify_workstream(name, "CVE-2024-1") == WORKSTREAM_CONTAINER
 

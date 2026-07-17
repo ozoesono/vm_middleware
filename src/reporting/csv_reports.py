@@ -366,6 +366,7 @@ def report_portfolio_summary(session: Session, filters: dict | None = None) -> s
 DEFAULT_CONTAINER_PATTERNS = [
     ".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "quay.io/",
     "registry.k8s.io/", "public.ecr.aws/", "mcr.microsoft.com/",
+    "container-registry.oracle.com/",
 ]
 
 WORKSTREAM_CONTAINER = "container_image"

@@ -50,6 +50,7 @@ tenable:
     - "registry.k8s.io/"
     - "public.ecr.aws/"
     - "mcr.microsoft.com/"
+    - "container-registry.oracle.com/"
 
   # Days before a missing finding is marked STALE (not auto-closed)
   stale_threshold_days: 7
