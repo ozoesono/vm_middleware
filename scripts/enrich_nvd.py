@@ -32,8 +32,12 @@ sys.path.insert(0, str(project_root))
 from src.common.config import AppConfig, AppSettings
 from src.common.db import get_session, init_db
 from src.common.logging import setup_logging
-from src.common.models import CveDetails, Finding
-from src.ingestion.nvd_enrichment import _filter_to_fetch, enrich_cves_from_findings
+from src.common.models import CveDetails
+from src.ingestion.nvd_enrichment import (
+    _filter_to_fetch,
+    distinct_finding_cves,
+    enrich_cves_from_findings,
+)
 
 
 def main():
@@ -44,6 +48,9 @@ def main():
                         help="Refresh cached entries older than this (default: config nvd.ttl_days)")
     parser.add_argument("--status", action="store_true",
                         help="Just report how many CVEs still need fetching, then exit.")
+    parser.add_argument("--scope", choices=["all", "non-container"], default="all",
+                        help="'non-container' fetches only host/VM CVE descriptions, "
+                             "skipping the huge set of container-image CVEs.")
     args = parser.parse_args()
 
     settings = AppSettings()
@@ -52,23 +59,20 @@ def main():
     init_db(settings.database_url)
 
     ttl_days = args.ttl_days if args.ttl_days is not None else config.nvd.ttl_days
+    exclude_container = args.scope == "non-container"
+    patterns = config.tenable.container_registry_patterns
 
     with get_session() as session:
-        # How much is left?
-        cve_rows = (
-            session.query(Finding.cve_id)
-            .filter(Finding.cve_id.isnot(None))
-            .distinct()
-            .all()
-        )
-        unique = {r[0] for r in cve_rows if r[0]}
+        # How much is left (within scope)?
+        unique = distinct_finding_cves(session, exclude_container, patterns)
         to_fetch = _filter_to_fetch(session, unique, ttl_days)
         cached_total = session.query(CveDetails).count()
 
         print("=" * 60)
         print("  NVD ENRICHMENT STATUS")
         print("=" * 60)
-        print(f"  Distinct CVEs on findings:   {len(unique):,}")
+        print(f"  Scope:                       {args.scope}")
+        print(f"  Distinct CVEs in scope:      {len(unique):,}")
         print(f"  Already cached (fresh):      {len(unique) - len(to_fetch):,}")
         print(f"  Still to fetch:              {len(to_fetch):,}")
         print(f"  Total rows in cve_details:   {cached_total:,}")
@@ -96,6 +100,8 @@ def main():
             ttl_days=ttl_days,
             api_key=api_key,
             max_fetch=args.max,
+            exclude_container=exclude_container,
+            container_patterns=patterns,
         )
 
         remaining = len(to_fetch) - cached

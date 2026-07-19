@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from sqlalchemy import not_, or_
 from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
@@ -231,11 +232,34 @@ def enrich_unique_cves_for_run(
     return _fetch_and_cache(session, to_fetch, api_key)
 
 
+def distinct_finding_cves(
+    session: Session,
+    exclude_container: bool = False,
+    container_patterns: list[str] | None = None,
+) -> set[str]:
+    """Return the distinct cve_ids on the canonical findings table.
+
+    When exclude_container is set, findings whose asset_name matches any
+    container registry pattern are dropped, so only host/VM (and other
+    non-container) CVEs remain. A CVE that appears on at least one
+    non-container asset is kept even if it also appears on container images.
+    """
+    from src.common.models import Finding  # local import to avoid cycles
+
+    q = session.query(Finding.cve_id).filter(Finding.cve_id.isnot(None))
+    if exclude_container and container_patterns:
+        registry_match = or_(*[Finding.asset_name.ilike(f"%{p}%") for p in container_patterns])
+        q = q.filter(or_(Finding.asset_name.is_(None), not_(registry_match)))
+    return {r[0] for r in q.distinct().all() if r[0]}
+
+
 def enrich_cves_from_findings(
     session: Session,
     ttl_days: int = 60,
     api_key: str | None = None,
     max_fetch: int | None = None,
+    exclude_container: bool = False,
+    container_patterns: list[str] | None = None,
 ) -> int:
     """Enrich CVEs from the canonical FINDINGS table — the standalone path.
 
@@ -244,19 +268,15 @@ def enrich_cves_from_findings(
     so re-running picks up where it left off. Bound the work per invocation
     with max_fetch (good for Lambda — fetch a chunk per scheduled run).
 
+    Set exclude_container to fetch only non-container (host/VM) CVE
+    descriptions — avoids grinding through the hundreds of thousands of
+    distinct container-image CVEs when only the host workstream is needed.
+
     Returns the number of CVEs cached this invocation.
     """
-    from src.common.models import Finding  # local import to avoid cycles
-
     api_key = api_key or os.environ.get("NVD_API_KEY")
 
-    cve_rows = (
-        session.query(Finding.cve_id)
-        .filter(Finding.cve_id.isnot(None))
-        .distinct()
-        .all()
-    )
-    unique_cves = {r[0] for r in cve_rows if r[0]}
+    unique_cves = distinct_finding_cves(session, exclude_container, container_patterns)
     to_fetch = _filter_to_fetch(session, unique_cves, ttl_days)
 
     if max_fetch is not None and max_fetch >= 0:
