@@ -90,6 +90,8 @@ def main():
                         help="Case-insensitive regex to filter property names.")
     parser.add_argument("--dump", default=None,
                         help="Directory to save each catalogue's raw JSON into.")
+    parser.add_argument("--names-only", action="store_true",
+                        help="Print just property names, one per line (compact, screenshot-friendly).")
     args = parser.parse_args()
 
     settings = AppSettings()
@@ -140,11 +142,14 @@ def main():
 
             suffix = f" matching /{args.grep}/" if pattern else ""
             print(f"\n=== {kind}: {len(display)} propert{'y' if len(display) == 1 else 'ies'}{suffix} ===")
-            if args.dump:
+            if args.dump and not args.names_only:
                 print(f"    (raw JSON saved to {Path(args.dump) / f'{kind}_properties.json'})")
             for name in display:
-                desc = names.get(name, "")
-                print(f"  {name}" + (f"  —  {desc[:100]}" if desc else ""))
+                if args.names_only:
+                    print(name)
+                else:
+                    desc = names.get(name, "")
+                    print(f"  {name}" + (f"  —  {desc[:100]}" if desc else ""))
 
 
 if __name__ == "__main__":
