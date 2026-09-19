@@ -1,4 +1,6 @@
 schedule:
-  cron: "0 6 * * *"    # Daily at 06:00 UTC
+  cron: "0 6 * * *"          # Pipeline: daily at 06:00 UTC
   timezone: "UTC"
   enabled: true
+  nvd_interval_minutes: 60   # NVD backfill: fetch a bounded chunk every hour
+  maintenance_cron: "30 5 * * *"  # Reap/prune: daily at 05:30 UTC

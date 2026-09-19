@@ -74,6 +74,7 @@ def _setup_or_resume_run(
     session,
     config: AppConfig,
     start_fresh: bool = False,
+    trigger: str = "manual",
 ) -> tuple[uuid.UUID, int, bool]:
     """Setup the pipeline run.
 
@@ -133,7 +134,7 @@ def _setup_or_resume_run(
         id=run_id,
         started_at=_utcnow(),
         status="RUNNING",
-        trigger="manual",
+        trigger=trigger,
         tag_filter=config.tenable.tag_filter,
     )
     session.add(pipeline_run)
@@ -147,6 +148,7 @@ def run_pipeline(
     mock_fixture_path: str | None = None,
     enrichment_csv_path: str | None = None,
     start_fresh: bool = False,
+    trigger: str = "manual",
 ) -> PipelineRun:
     """Execute the streaming pipeline.
 
@@ -172,7 +174,9 @@ def run_pipeline(
     setup_logging(config.settings.log_level)
 
     with get_session() as session:
-        run_id, start_offset, is_resume = _setup_or_resume_run(session, config, start_fresh)
+        run_id, start_offset, is_resume = _setup_or_resume_run(
+            session, config, start_fresh, trigger
+        )
         session.commit()
 
         logger.info(

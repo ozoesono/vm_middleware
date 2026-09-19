@@ -113,6 +113,11 @@ class ScheduleConfig(BaseModel):
     cron: str = "0 6 * * *"
     timezone: str = "UTC"
     enabled: bool = True
+    # NVD backfill runs on an interval rather than a cron: it is resumable, so
+    # each tick just fetches the next bounded chunk of uncached CVEs.
+    nvd_interval_minutes: int = 60
+    # Daily housekeeping (reap abandoned runs, prune aged STALE findings).
+    maintenance_cron: str = "30 5 * * *"
 
 
 class TenableConfig(BaseModel):
@@ -213,6 +218,9 @@ class AppSettings(BaseSettings):
     database_url: SecretStr = SecretStr(
         "postgresql://vm_user:vm_local_pass@localhost:5435/vm_middleware"
     )
+    # Celery broker/result backend. Inside docker-compose the worker/beat
+    # services override this to redis://redis:6379/0 via environment.
+    redis_url: str = "redis://localhost:6379/0"
     tenable_access_key: SecretStr = SecretStr("")
     tenable_secret_key: SecretStr = SecretStr("")
     jira_api_token: SecretStr = SecretStr("")

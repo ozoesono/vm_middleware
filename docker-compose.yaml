@@ -1,22 +1,86 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: vm-middleware-db
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: vm_middleware
-      POSTGRES_USER: vm_user
-      POSTGRES_PASSWORD: vm_local_pass
+      POSTGRES_DB: ${POSTGRES_DB:-vm_middleware}
+      POSTGRES_USER: ${POSTGRES_USER:-vm_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vm_local_pass}
     ports:
-      - "5435:5432"
+      - "${POSTGRES_PORT_HOST:-5435}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vm_user -d vm_middleware"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vm-middleware-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot schema migration; worker waits for it to complete successfully.
+  migrate:
+    build: .
+    container_name: vm-middleware-migrate
+    command: ["sh", "-c", "cd db && alembic upgrade head"]
+    env_file:
+      - path: .env
+        required: false
+    environment: &app-env
+      # Inside the network the DB is `postgres:5432`; the host keeps using
+      # localhost:5435 via .env for the CLI scripts.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vm_user}:${POSTGRES_PASSWORD:-vm_local_pass}@postgres:5432/${POSTGRES_DB:-vm_middleware}
+      REDIS_URL: redis://redis:6379/0
+      CONFIG_DIR: config
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    container_name: vm-middleware-worker
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  beat:
+    build: .
+    container_name: vm-middleware-beat
+    restart: unless-stopped
+    command:
+      - celery
+      - -A
+      - src.celery_app:celery_app
+      - beat
+      - --loglevel=info
+      - --schedule=/tmp/celerybeat-schedule
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
 
 volumes:
   pgdata:

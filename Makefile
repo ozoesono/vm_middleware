@@ -1,4 +1,5 @@
-.PHONY: install test db-up db-down db-migrate db-rollback run-pipeline lint clean
+.PHONY: install test db-up db-down db-migrate db-rollback run-pipeline lint clean \
+	stack-up stack-down stack-logs stack-ps
 
 PYTHON ?= python3
 ROOT_DIR := $(shell pwd)
@@ -22,10 +23,23 @@ db-up:
 	docker-compose up -d postgres
 	@echo "Waiting for PostgreSQL..."
 	@sleep 3
-	@echo "PostgreSQL is ready on localhost:5432"
+	@echo "PostgreSQL is ready on localhost:5435"
 
 db-down:
 	docker-compose down
+
+stack-up:
+	docker-compose up -d --build
+	@echo "Stack is up: postgres, redis, migrate (one-shot), worker, beat"
+
+stack-down:
+	docker-compose down
+
+stack-logs:
+	docker-compose logs -f worker beat
+
+stack-ps:
+	docker-compose ps
 
 db-migrate:
 	cd db && $(ALEMBIC) upgrade head

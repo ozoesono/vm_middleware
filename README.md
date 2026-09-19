@@ -7,8 +7,10 @@ configurable risk formula, reconciles each finding against previously stored sta
 produces CSV reports. CVE descriptions are filled in from the NIST NVD because Tenable
 leaves them empty for Cloud Security findings.
 
-There is no web server or UI. It runs as a command-line pipeline against a PostgreSQL
-database, and is built to run later as scheduled AWS Lambda functions.
+There is no web server or UI. Work runs through **Celery workers with Redis as the
+broker and Celery Beat for scheduling** (pipeline, NVD backfill, and housekeeping), all
+wired together with docker-compose. The same jobs can also be run as one-off CLI
+commands against a local PostgreSQL database.
 
 ## What it does
 
@@ -31,6 +33,7 @@ Each run goes through the same stages:
 
 - Python 3.10+
 - PostgreSQL 16 (run locally in Docker)
+- Celery 5 + Redis 7 (worker execution, Beat scheduling, overlap locking)
 - SQLAlchemy 2.0 and Alembic for the data layer and migrations
 - Pydantic and YAML for configuration
 - httpx and tenacity for HTTP with retries
@@ -68,6 +71,7 @@ The variables you need:
 | Variable | Required | Purpose |
 |---|---|---|
 | `DATABASE_URL` | yes | Connection string. Defaults to the local Docker database on port 5435. |
+| `REDIS_URL` | yes (workers) | Celery broker/backend. Defaults to `redis://localhost:6379/0`; compose overrides it to the `redis` service. |
 | `TENABLE_ACCESS_KEY` | yes | Tenable API access key. |
 | `TENABLE_SECRET_KEY` | yes | Tenable API secret key. |
 | `TENABLE_BASE_URL` | yes | Tenable endpoint (defaults to `https://cloud.tenable.com`). |
@@ -83,8 +87,8 @@ Operational behaviour lives in `config/*.yaml` and can be changed without touchi
 | `scoring.yaml` | Risk formula, weights, thresholds, criticality scores |
 | `sla_policy.yaml` | SLA days per severity, business-day handling |
 | `nvd.yaml` | Cache TTL, whether NVD runs inline, per-run cap |
+| `schedule.yaml` | Beat schedule: pipeline cron, NVD interval, maintenance cron |
 | `rollout.yaml` | Phased Jira rollout (Phase 2) |
-| `schedule.yaml` | Cron schedule (Phase 2) |
 | `jira.yaml` | Jira connection (Phase 2) |
 
 ### 3. Start the database
@@ -115,6 +119,32 @@ make run-pipeline-mock
 ## Commands
 
 All commands assume the virtualenv at `.venv`. The `make` targets wrap the most common ones.
+
+### Scheduled stack (Celery + Redis)
+
+The full stack runs in docker-compose: `postgres`, `redis`, a one-shot `migrate`
+service, a Celery `worker`, and Celery `beat`. Beat takes its schedule from
+`config/schedule.yaml`: the pipeline runs on `cron`, NVD backfill fetches a bounded
+chunk every `nvd_interval_minutes`, and housekeeping (reap abandoned runs, prune aged
+STALE findings) runs on `maintenance_cron`. A Redis lock ensures a beat tick never
+starts a second pipeline run while one is already active.
+
+```bash
+make stack-up        # build the image and start postgres, redis, migrate, worker, beat
+make stack-logs      # follow worker and beat logs
+make stack-ps        # service status
+make stack-down      # stop everything
+```
+
+Trigger a job by hand through the worker (bypasses the schedule, still uses the lock):
+
+```bash
+docker compose exec worker celery -A src.celery_app:celery_app call src.tasks.run_pipeline_task
+docker compose exec worker celery -A src.celery_app:celery_app call src.tasks.maintenance_task
+```
+
+The CLI below remains fully supported for one-off and mock runs; it talks directly to
+PostgreSQL and does not need the worker containers.
 
 ### Pipeline
 
@@ -238,23 +268,27 @@ make format          # ruff autofix + format
 ## Project layout
 
 ```
-config/         YAML configuration (scoring, SLA, Tenable, NVD, rollout, schedule)
+config/         YAML configuration (scoring, SLA, Tenable, NVD, schedule, rollout)
 db/             Alembic config and migrations (001-006)
-scripts/        Entry points: run_local.py, generate_report.py, enrich_nvd.py
+scripts/        CLI entry points: run_local.py, generate_report.py, enrich_nvd.py
 src/
+  celery_app.py Celery app: Redis broker config + Beat schedule (from schedule.yaml)
+  tasks.py      Celery tasks: pipeline (Redis-locked), NVD backfill, maintenance
   common/       Config loader, DB session, ORM models, logging, tag parser
   ingestion/    Tenable client, tagged-asset pre-flight, normalisation, enrichment, NVD
   scoring/      Risk models (custom VPR+ACS, Lumin CES), SLA calculation
   reconciliation/  State machine that diffs a run against stored findings
   reporting/    CSV report builders
   pipeline.py   Orchestrator
-  lambdas/      AWS Lambda entry points (Phase 2)
 tests/          Unit tests and fixtures
+Dockerfile      Worker/beat image (python:3.12-slim, non-root)
+docker-compose.yaml  postgres + redis + migrate + worker + beat
 ```
 
 ## Deployment
 
-Local development runs everything against the Docker PostgreSQL instance. The production
-target is AWS in a UK region: EventBridge triggers a Step Functions workflow that runs
-the pipeline on Lambda against RDS PostgreSQL, with reports delivered to S3. The same
-codebase runs in both places; only the entry point differs.
+Local development runs everything in docker-compose: PostgreSQL, Redis, a one-shot
+Alembic migration, a Celery worker, and Celery Beat. The production target follows the
+same shape: a managed Redis (e.g. AWS ElastiCache) as broker, worker and beat deployed
+as long-running services (e.g. ECS), PostgreSQL on RDS, and reports delivered to S3.
+The same codebase and image run in both places; only the environment differs.
