@@ -55,6 +55,8 @@ services:
       - path: .env
         required: false
     environment: *app-env
+    volumes:
+      - ./config:/srv/config:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -76,6 +78,8 @@ services:
       - path: .env
         required: false
     environment: *app-env
+    volumes:
+      - ./config:/srv/config:ro
     depends_on:
       redis:
         condition: service_healthy

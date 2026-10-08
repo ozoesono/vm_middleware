@@ -1,19 +1,16 @@
 jira:
-  base_url: "https://org.atlassian.net"
-  default_project: "VULN"
-  issue_type: "Task"
-  labels: ["vm-middleware"]
+  # Enable only after validate, preview and check succeed for your pilot teams.
+  enabled: false
+  batch_size: 100
+  refresh_seconds: 3600
+  retry_base_seconds: 60
+  max_attempts: 5
 
-  priority_mapping:
-    CRITICAL: "Highest"
-    HIGH: "High"
-    MEDIUM: "Medium"
-    LOW: "Low"
-
-  portfolio_project_mapping: {}
-  # Example:
-  #   payments: "PAY"
-  #   platform: "PLAT"
-
-  close_transition: "Done"
-  reopen_transition: "To Do"
+  instances:
+    shared:
+      deployment: cloud
+      base_url: https://org.atlassian.net
+      auth:
+        type: basic
+        email_env: JIRA_USER_EMAIL
+        token_env: JIRA_API_TOKEN

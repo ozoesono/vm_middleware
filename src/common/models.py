@@ -88,6 +88,21 @@ class Finding(Base):
     jira_ticket_status = Column(String(50), nullable=True)
     jira_created_at = Column(DateTime, nullable=True)
     jira_closed_at = Column(DateTime, nullable=True)
+    jira_instance_id = Column(String(100), nullable=True)
+    jira_team_id = Column(String(100), nullable=True)
+    jira_issue_id = Column(String(100), nullable=True)
+    jira_ticket_url = Column(String(1000), nullable=True)
+    # Connection identity and destination at first delivery; no credential values.
+    jira_binding = Column(JSON(none_as_null=True), nullable=True)
+    jira_sync_status = Column(String(30), nullable=True)
+    jira_sync_error = Column(Text, nullable=True)
+    jira_last_synced_at = Column(DateTime, nullable=True)
+    jira_last_checked_at = Column(DateTime, nullable=True)
+    jira_next_sync_at = Column(DateTime, nullable=True)
+    jira_synced_hash = Column(String(64), nullable=True)
+    jira_attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    # Committed BEFORE POST /issue. Until linked or definitively rejected, never POST again.
+    jira_create_started_at = Column(DateTime, nullable=True)
 
     # Metadata
     created_at = Column(DateTime, nullable=False, server_default=func.now())
@@ -100,6 +115,9 @@ class Finding(Base):
         Index("ix_findings_portfolio_service", "portfolio", "service"),
         Index("ix_findings_last_seen", "last_seen"),
         Index("ix_findings_jira_ticket_key", "jira_ticket_key"),
+        Index("ix_findings_jira_sync_due", "jira_next_sync_at", "jira_last_checked_at"),
+        Index("ix_findings_jira_team_id", "jira_team_id"),
+        UniqueConstraint("jira_instance_id", "jira_issue_id", name="uq_findings_jira_issue"),
     )
 
 
@@ -193,12 +211,32 @@ class JiraActionQueue(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     finding_id = Column(UUID(as_uuid=True), nullable=False)
-    action = Column(String(20), nullable=False)  # CREATE / UPDATE / CLOSE / REOPEN
+    action = Column(String(20), nullable=False)  # CREATE / UPDATE / CLOSE / REOPEN / SYNC
     payload = Column(JSON, nullable=True)  # Action-specific data
-    status = Column(String(20), nullable=False, default="PENDING")  # PENDING / DONE / FAILED
+    # PENDING / PROCESSING / DONE / SUPERSEDED / DEFERRED / RETRY / UNCERTAIN / FAILED
+    status = Column(String(20), nullable=False, default="PENDING")
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     processed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_jira_queue_finding_status", "finding_id", "status"),)
+
+
+class JiraCreationBudget(Base):
+    """Reserved CREATE attempts per team and completed ingestion run."""
+
+    __tablename__ = "jira_creation_budgets"
+    run_id = Column(UUID(as_uuid=True), primary_key=True)
+    team_id = Column(String(100), primary_key=True)
+    reserved = Column(Integer, nullable=False, default=0)
+
+
+class JiraInstanceState(Base):
+    """Persist rate-limit cooldowns across workers and manual invocations."""
+
+    __tablename__ = "jira_instance_state"
+    instance_id = Column(String(100), primary_key=True)
+    retry_after = Column(DateTime, nullable=True)
 
 
 class JiraSyncLog(Base):
@@ -210,6 +248,8 @@ class JiraSyncLog(Base):
     run_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     finding_id = Column(UUID(as_uuid=True), nullable=False)
     jira_ticket_key = Column(String(50), nullable=True)
+    jira_instance_id = Column(String(100), nullable=True)
+    jira_team_id = Column(String(100), nullable=True)
     action = Column(String(20), nullable=False)
     request_payload = Column(JSON, nullable=True)
     response_status = Column(Integer, nullable=True)

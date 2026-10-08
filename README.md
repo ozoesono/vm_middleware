@@ -4,11 +4,12 @@ A batch application that turns raw Tenable findings into prioritised, business-a
 vulnerability records. It pulls findings from the Tenable One Inventory API
 (Exposure Management), enriches them with business context from asset tags, applies a
 configurable risk formula, reconciles each finding against previously stored state, and
-produces CSV reports. CVE descriptions are filled in from the NIST NVD because Tenable
+produces CSV reports. Optional Jira delivery creates and maintains tickets in each
+team's configured Jira instance and project. CVE descriptions come from the NIST NVD because Tenable
 leaves them empty for Cloud Security findings.
 
 There is no web server or UI. Work runs through **Celery workers with Redis as the
-broker and Celery Beat for scheduling** (pipeline, NVD backfill, and housekeeping), all
+broker and Celery Beat for scheduling** (pipeline, Jira delivery, NVD backfill and housekeeping), all
 wired together with docker-compose. The same jobs can also be run as one-off CLI
 commands against a local PostgreSQL database.
 
@@ -28,6 +29,10 @@ Each run goes through the same stages:
    the right state transition: NEW, STILL OPEN, REMEDIATED, RECURRENCE, or STALE.
 5. **Report** — generate CSVs on demand from the stored findings. CVE descriptions come
    from a cached NVD lookup that runs separately so it never blocks the pipeline.
+
+Jira delivery runs as a separate bounded task. It reads current finding state and
+queued reconciliation actions, so a Jira outage does not block ingestion. Delivery
+is disabled in the supplied configuration.
 
 ## Stack
 
@@ -88,8 +93,9 @@ Operational behaviour lives in `config/*.yaml` and can be changed without touchi
 | `sla_policy.yaml` | SLA days per severity, business-day handling |
 | `nvd.yaml` | Cache TTL, whether NVD runs inline, per-run cap |
 | `schedule.yaml` | Beat schedule: pipeline cron, NVD interval, maintenance cron |
-| `rollout.yaml` | Phased Jira rollout (Phase 2) |
-| `jira.yaml` | Jira connection (Phase 2) |
+| `rollout.yaml` | Jira pilot teams, scored risk ratings and global creation limit |
+| `jira.yaml` | Jira instances, credential references, delivery switch and retry settings |
+| `teams/*.yaml` | Team ownership selectors, Jira project, workflow, fields and creation limits |
 
 ### 3. Start the database
 
@@ -126,7 +132,9 @@ The full stack runs in docker-compose: `postgres`, `redis`, a one-shot `migrate`
 service, a Celery `worker`, and Celery `beat`. Beat takes its schedule from
 `config/schedule.yaml`: the pipeline runs on `cron`, NVD backfill fetches a bounded
 chunk every `nvd_interval_minutes`, and housekeeping (reap abandoned runs, prune aged
-STALE findings) runs on `maintenance_cron`. A Redis lock ensures a beat tick never
+STALE findings) runs on `maintenance_cron`. Jira delivery ticks every
+`jira_interval_seconds` and reads fresh Jira/team configuration each time.
+A Redis lock ensures a beat tick never
 starts a second pipeline run while one is already active.
 
 ```bash
@@ -188,11 +196,154 @@ continues from its checkpoint. Use `--start-fresh` to override that.
 ```
 
 Reports: `findings`, `risk-summary`, `sla-breaches`, `sla-approaching`, `recurrence`,
-`portfolio-summary`.
+`portfolio-summary`, `workstream-summary`, `jira-sync`, `team-summary`.
 
 Filters (each repeatable; values OR within a key, keys AND together):
 `--portfolio`, `--service`, `--environment`, `--asset-criticality`, `--risk-rating`,
-`--severity`, `--state`, `--sla-status`, `--source`. With no `--out`, the CSV goes to stdout.
+`--severity`, `--state`, `--sla-status`, `--source`, `--team`, `--owner-team`,
+`--jira-sync-status`. With no `--out`, the CSV goes to stdout. `--team` selects the
+canonical team ID recorded when delivery last evaluated the finding; `--owner-team`
+filters the source ownership field and also works before Jira delivery is enabled.
+
+### Jira onboarding
+
+The integration creates one ticket per finding. Multiple teams can share a Jira
+connection, use different projects, or reference separate Jira instances. Team
+onboarding uses YAML and credentials; it needs no Python changes.
+
+Run migration `008` before starting the updated workers or querying the new reports:
+
+```bash
+make db-migrate
+```
+
+Connections live under `jira.instances` in `config/jira.yaml`. Each connection has a
+stable ID, `deployment: cloud` or `deployment: data_center`, an HTTPS `base_url` and
+an `auth` mapping. Cloud uses API v3 and ADF descriptions; Data Center uses API v2 and
+text descriptions. The Data Center adapter requires the paginated create-metadata
+endpoints. Check compatibility with the team's deployed version during onboarding.
+
+Use `auth.type: basic` with `email_env` and `token_env` for an email/API-token pair,
+or `auth.type: bearer` with `token_env` for a bearer credential. YAML holds the
+environment variable names. The worker reads their values from its environment.
+For Cloud credentials that use the Atlassian API gateway, set `base_url` to
+`https://api.atlassian.com/ex/jira/<cloudId>` and `browse_url` to the team's Jira site.
+Credential provisioning, expiry and rotation remain the operator's responsibility.
+
+Copy `config/teams/platform.yaml` for each team and set its `team_id`, ownership
+selectors, instance ID and project. A team's `match` can use `service_owner_team`,
+`portfolio`, `service` and `environment`. Values within a selector use OR; selectors
+use AND. Matching ignores case and surrounding whitespace. The loader rejects
+overlapping rules, unknown keys, duplicate team IDs and missing instance references.
+Unmatched findings remain unticketed and appear as `UNROUTED` after delivery examines them.
+
+Each team can set priority names, labels, component names, initial assignment,
+literal `custom_fields` values keyed by Jira field ID, and close/reopen transitions.
+`assignee` uses `accountId` for Cloud or `name` for Data Center. Transition settings
+accept the transition name or ID, which can differ from the destination status name.
+Use `transitions.close_fields` and `transitions.reopen_fields` for required transition
+fields, such as resolution. Quote dates in custom YAML values.
+
+```bash
+# Offline schema validation; no database or Jira connection
+.venv/bin/python scripts/jira.py validate
+
+# Read-only routing, eligibility and proposed payloads from the local database
+.venv/bin/python scripts/jira.py preview --team team-platform --limit 25
+
+# Read Jira's create metadata using the configured credentials; creates no tickets
+.venv/bin/python scripts/jira.py check --team team-platform
+```
+
+Set the team's `enabled: true` to preview eligible creates, while keeping the global
+`jira.enabled: false`. Include its ID in the active rollout phase's `team_filter`, or
+use an empty list to allow all configured teams. Both the team and rollout risk
+filters apply to the scored `risk_rating`; the legacy rollout setting is named
+`severity_filter`. Preview does not reserve capacity, contact Jira, or change database
+records. It shows eligibility and payloads, alongside delivery status and the next
+scheduled attempt; a paused failure still requires an explicit retry.
+
+`check` validates the configured issue type, required create fields and enumerated
+values returned by Jira. It does not prove every workflow transition or update
+permission. The worker checks available transitions and their required fields on
+each actual issue. Use a small pilot to verify the team's full lifecycle.
+
+When ready, set `jira.enabled: true`. Beat then delivers bounded batches, or run one
+batch manually:
+
+```bash
+.venv/bin/python scripts/jira.py sync
+.venv/bin/python scripts/generate_report.py --report jira-sync --team team-platform
+.venv/bin/python scripts/generate_report.py --report team-summary
+```
+
+The worker also picks up existing eligible OPEN findings without tickets. Global
+and team creation limits share the most recent completed ingestion run as their
+budget period, so repeated worker ticks cannot reset the allowance. Successful
+creates and unresolved create attempts consume capacity; explicit Jira rejections
+release their reservation. A new completed ingestion run starts a new allowance.
+Updates, closures and reopens do not consume creation capacity. Setting a team's
+`enabled: false` stops new tickets but allows its linked tickets to stay in sync.
+The global switch stops all Jira delivery on the next batch.
+
+Compose mounts `config/` read-only into worker and Beat. Jira/team/rollout changes
+take effect on the next batch without rebuilding the image. Publish related YAML
+changes together. New or rotated environment credentials require recreating the
+worker container; schedule changes require restarting Beat. Findings deferred for
+routing or eligibility are rechecked after `refresh_seconds`, subject to batch
+capacity. Existing ticket work takes priority over onboarding new findings.
+
+### Jira lifecycle and recovery
+
+Tenable remains the remediation source. Only an explicit `FIXED` finding in
+`REMEDIATED` state closes a ticket. A returning OPEN finding reopens a resolved
+ticket. Missing/STALE findings do neither. SLA/risk changes update managed ticket
+fields; the worker preserves subsequent human assignment and team-added labels.
+Resolved issues are reopened before editing, and already-resolved fixed or stale
+issues receive status checks only. The worker never automatically deletes tickets.
+
+Ticket bindings retain instance, issue ID, project and team. Changing a routing
+rule does not move existing tickets. Field/workflow changes apply when a team's
+destination still matches the binding; otherwise the saved destination settings
+remain in use. Keep bound connection IDs and URLs stable. A removed connection or
+changed API address blocks delivery until corrected. Stale retention preserves
+linked findings, uncertain creates and pending Jira work.
+
+A PostgreSQL advisory lock serializes CLI and Celery delivery, including across
+database commits. Use a direct or session-pooled PostgreSQL connection for this
+worker; transaction-mode pooling cannot preserve that lock. SQLite is only used
+for isolated tests.
+
+Before sending CREATE, the worker commits the destination, creation reservation and
+an attempt marker. Each ticket carries a `vmf-<finding UUID>` label. If the response
+is lost, the finding becomes `UNCERTAIN` and subsequent batches search for that label.
+They do not repeat CREATE while the outcome is unknown. Zero search results can
+reflect indexing delay; multiple matches require operator investigation.
+
+Rate limits and transient failures use persisted backoff, including `Retry-After`.
+An instance cooldown does not stop delivery to another instance. Outside uncertain
+CREATE recovery, permanent errors or exhausted retries become `FAILED`.
+Inspect `jira-sync` for status, the
+last error and ticket URL; `jira_sync_log` records API method/path/status without
+credentials or raw response bodies. After correcting a failure:
+
+```bash
+.venv/bin/python scripts/jira.py retry --finding-id <finding-uuid>
+```
+
+To recover a known ticket or explicitly adopt a legacy ticket with no instance
+binding, supply its team and key. This command reads Jira and updates the local
+binding; the next enabled sync may update the ticket:
+
+```bash
+.venv/bin/python scripts/jira.py adopt \
+    --finding-id <finding-uuid> --team team-platform --issue-key PLAT-123
+```
+
+Recovery of an uncertain CREATE requires the matching correlation label. If an
+operator confirms in Jira that no ticket was created, `retry` also accepts
+`--clear-uncertain-create`. That flag permits a fresh CREATE and can cause a duplicate
+if used before the earlier outcome is resolved. Ordinary retries retain the marker.
 
 ### CVE enrichment (NVD)
 
@@ -265,20 +416,26 @@ make lint            # ruff check + format check
 make format          # ruff autofix + format
 ```
 
+The PostgreSQL migration and locking tests run only when
+`VM_JIRA_TEST_DATABASE_URL` points to an isolated test database. They create and
+remove disposable schemas within it. Jira HTTP tests use mock transports; a real
+team's credentials, fields and workflows still need pilot validation.
+
 ## Project layout
 
 ```
-config/         YAML configuration (scoring, SLA, Tenable, NVD, schedule, rollout)
-db/             Alembic config and migrations (001-006)
-scripts/        CLI entry points: run_local.py, generate_report.py, enrich_nvd.py
+config/         YAML configuration, Jira connections and teams/*.yaml
+db/             Alembic config and migrations (001-008)
+scripts/        CLI entry points: run_local.py, generate_report.py, enrich_nvd.py, jira.py
 src/
   celery_app.py Celery app: Redis broker config + Beat schedule (from schedule.yaml)
-  tasks.py      Celery tasks: pipeline (Redis-locked), NVD backfill, maintenance
+  tasks.py      Celery tasks: pipeline, Jira delivery, NVD backfill, maintenance
   common/       Config loader, DB session, ORM models, logging, tag parser
   ingestion/    Tenable client, tagged-asset pre-flight, normalisation, enrichment, NVD
   scoring/      Risk models (custom VPR+ACS, Lumin CES), SLA calculation
   reconciliation/  State machine that diffs a run against stored findings
   reporting/    CSV report builders
+  integration/  Jira routing, payloads, HTTP adapter, previews and delivery
   pipeline.py   Orchestrator
 tests/          Unit tests and fixtures
 Dockerfile      Worker/beat image (python:3.12-slim, non-root)

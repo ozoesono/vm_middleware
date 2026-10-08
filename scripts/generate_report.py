@@ -50,6 +50,9 @@ def main():
     parser.add_argument("--state", action="append")
     parser.add_argument("--sla-status", action="append", dest="sla_status")
     parser.add_argument("--source", action="append")
+    parser.add_argument("--team", action="append", help="canonical team_id recorded by Jira sync")
+    parser.add_argument("--owner-team", action="append", dest="service_owner_team")
+    parser.add_argument("--jira-sync-status", action="append", dest="jira_sync_status")
 
     args = parser.parse_args()
 
@@ -67,6 +70,7 @@ def main():
     for key in (
         "portfolio", "service", "environment", "asset_criticality",
         "risk_rating", "severity", "state", "sla_status", "source",
+        "team", "service_owner_team", "jira_sync_status",
     ):
         val = getattr(args, key)
         if val:

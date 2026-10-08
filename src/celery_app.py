@@ -51,6 +51,12 @@ def _build_beat_schedule(config: AppConfig) -> dict:
         "task": "src.tasks.maintenance_task",
         "schedule": _crontab(config.schedule.maintenance_cron),
     }
+    # The task reads jira.enabled afresh, so team configuration can be reloaded
+    # without restarting Beat. A disabled integration makes no database/API calls.
+    entries["jira-sync"] = {
+        "task": "src.tasks.sync_jira_task",
+        "schedule": float(config.schedule.jira_interval_seconds),
+    }
     return entries
 
 

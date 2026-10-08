@@ -29,7 +29,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
-from src.common.models import Finding, PipelineRun
+from src.common.models import Finding, JiraActionQueue, PipelineRun
 
 logger = get_logger("maintenance")
 
@@ -144,6 +144,13 @@ def prune_stale_findings(
     eligible_q = session.query(Finding).filter(
         Finding.state == "STALE",
         last_activity < cutoff,
+        Finding.jira_ticket_key.is_(None),
+        Finding.jira_binding.is_(None),
+        Finding.jira_create_started_at.is_(None),
+        ~session.query(JiraActionQueue.id).filter(
+            JiraActionQueue.finding_id == Finding.id,
+            JiraActionQueue.status.in_(["PENDING", "PROCESSING", "RETRY", "UNCERTAIN"]),
+        ).exists(),
     )
     eligible = eligible_q.count()
 

@@ -15,10 +15,11 @@ import os
 import redis
 
 from src.celery_app import celery_app
-from src.common.config import get_config
-from src.common.db import get_session
+from src.common.config import AppConfig, get_config
+from src.common.db import get_engine, get_session
 from src.common.logging import get_logger, setup_logging
 from src.ingestion.nvd_enrichment import enrich_cves_from_findings
+from src.integration.jira_sync import sync_jira
 from src.maintenance.retention import prune_stale_findings, reap_stale_runs
 from src.pipeline import run_pipeline
 
@@ -28,6 +29,16 @@ logger = get_logger("tasks")
 # second concurrent run. Timeout matches the abandoned-run reaper: a worker
 # that dies releases the lock no later than when the run itself is reaped.
 PIPELINE_LOCK_KEY = "vm:pipeline:lock"
+
+
+@celery_app.task(name="src.tasks.sync_jira_task")
+def sync_jira_task() -> dict:
+    """Load a fresh, validated config snapshot on every delivery batch."""
+    config = AppConfig()
+    setup_logging(config.settings.log_level)
+    if not config.jira.enabled:
+        return {"skipped": True, "reason": "Jira delivery is disabled"}
+    return sync_jira(get_engine(), config)
 
 
 def _redis_client() -> redis.Redis:

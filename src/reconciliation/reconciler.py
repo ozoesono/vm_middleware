@@ -209,6 +209,9 @@ def _queue_jira_action(
     payload: dict | None = None,
 ) -> None:
     """Add an action to the Jira action queue."""
+    finding = session.get(Finding, finding_id)
+    if finding and finding.jira_sync_status not in ("RETRY", "UNCERTAIN", "FAILED"):
+        finding.jira_next_sync_at = None
     session.add(JiraActionQueue(
         id=uuid.uuid4(),
         run_id=run_id,
@@ -254,6 +257,9 @@ def _process_existing_with_staged(
 
     else:
         # STILL OPEN: update with latest data
+        old_sla_status = finding.sla_status
+        old_risk_rating = finding.risk_rating
+        finding.state = "OPEN"
         finding.tenable_state = tenable_state
         finding.last_seen = staged.last_seen or finding.last_seen
         finding.vpr_score = staged.vpr_score or finding.vpr_score
@@ -273,11 +279,12 @@ def _process_existing_with_staged(
         _score_and_sla(finding, config)
 
         # Check if SLA status changed — queue UPDATE if it did
-        old_sla_status = finding.sla_status
         new_sla_status = determine_sla_status(finding.sla_due_date, config.sla)
         finding.sla_status = new_sla_status
 
-        if finding.jira_ticket_key and old_sla_status != new_sla_status:
+        if finding.jira_ticket_key and (
+            old_sla_status != new_sla_status or old_risk_rating != finding.risk_rating
+        ):
             _queue_jira_action(session, run_id, finding.id, "UPDATE", {
                 "sla_status_change": f"{old_sla_status} -> {new_sla_status}",
                 "risk_score": finding.risk_score,
@@ -346,7 +353,7 @@ def _process_recurrence(
         "recurrence_count": finding.recurrence_count,
         "previous_remediation_date": str(finding.jira_closed_at) if finding.jira_closed_at else None,
     })
-    finding.jira_closed_at = None
+    # Delivery records when Jira actually reopens, independently of Tenable state.
 
     stats.findings_recurred += 1
     stats.jira_actions_created += 1
@@ -395,7 +402,7 @@ def _process_new_finding(
         asset_type=staged.asset_type,
         asset_ip=staged.asset_ip,
         asset_hostname=staged.asset_hostname,
-        state="OPEN",
+        state="REMEDIATED" if (staged.tenable_state or "").upper() == "FIXED" else "OPEN",
         tenable_state=staged.tenable_state or "Active",
         first_seen=staged.first_seen or _utcnow(),
         last_seen=staged.last_seen or _utcnow(),
@@ -415,6 +422,13 @@ def _process_new_finding(
     _score_and_sla(finding, config)
 
     session.add(finding)
+
+    if finding.state == "REMEDIATED":
+        finding.remediated_at = staged.last_seen or _utcnow()
+        if finding.first_seen:
+            finding.time_to_fix_days = max(0, (finding.remediated_at - finding.first_seen).days)
+        stats.findings_new += 1
+        return
 
     # Queue Jira ticket creation
     _queue_jira_action(session, run_id, finding.id, "CREATE", {

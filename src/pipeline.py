@@ -252,7 +252,7 @@ def run_pipeline(
             run.findings_stale = recon_stats.findings_stale
             session.commit()
 
-            # Log Jira queue (not actually called in Phase 0)
+            # Jira delivery runs independently once this run is marked complete.
             actions = (
                 session.query(JiraActionQueue)
                 .filter(JiraActionQueue.run_id == run_id)

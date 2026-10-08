@@ -53,6 +53,9 @@ def _apply_filters(query, filters: dict[str, Any] | None):
         "state": Finding.state,
         "sla_status": Finding.sla_status,
         "source": Finding.source,
+        "team": Finding.jira_team_id,
+        "service_owner_team": Finding.service_owner_team,
+        "jira_sync_status": Finding.jira_sync_status,
     }
     for key, value in filters.items():
         col = column_map.get(key)
@@ -116,6 +119,12 @@ FINDINGS_COLUMNS = [
     "recurrence_count",
     "jira_ticket_key",
     "jira_ticket_status",
+    "jira_team_id",
+    "jira_instance_id",
+    "jira_ticket_url",
+    "jira_sync_status",
+    "jira_sync_error",
+    "jira_last_synced_at",
 ]
 
 
@@ -441,6 +450,36 @@ def report_workstream_summary(
     )
 
 
+def report_jira_sync(session: Session, filters: dict | None = None) -> str:
+    """Delivery state per finding, including findings that have no Jira ticket."""
+    columns = ["id", "tenable_finding_id", "service_owner_team", "jira_team_id",
+               "risk_rating", "state", "sla_status", "jira_instance_id", "jira_ticket_key",
+               "jira_ticket_url", "jira_ticket_status", "jira_sync_status", "jira_sync_error",
+               "jira_attempts", "jira_last_synced_at", "jira_next_sync_at"]
+    findings = _apply_filters(session.query(Finding), filters).order_by(Finding.risk_score.desc())
+    return _write_csv([{col: getattr(f, col) for col in columns} for f in findings], columns)
+
+
+def report_team_summary(session: Session, filters: dict | None = None) -> str:
+    """Counts by resolved team and source ownership, including unticketed open risk."""
+    from sqlalchemy import and_
+    columns = ["jira_team_id", "service_owner_team", "open_findings", "unticketed_open",
+               "sla_breaches", "delivery_errors"]
+    query = _apply_filters(session.query(
+        Finding.jira_team_id, Finding.service_owner_team,
+        func.sum(case((Finding.state == "OPEN", 1), else_=0)).label("open_findings"),
+        func.sum(case((and_(Finding.state == "OPEN", Finding.jira_ticket_key.is_(None)), 1),
+                      else_=0)).label("unticketed_open"),
+        func.sum(case((and_(Finding.state.in_(["OPEN", "STALE"]),
+                           Finding.sla_status == "BREACHED"), 1),
+                      else_=0)).label("sla_breaches"),
+        func.sum(case((Finding.jira_sync_status.in_(
+            ["FAILED", "UNCERTAIN", "BLOCKED", "RETRY"]), 1),
+                      else_=0)).label("delivery_errors"),
+    ), filters).group_by(Finding.jira_team_id, Finding.service_owner_team)
+    return _write_csv([dict(row._mapping) for row in query], columns)
+
+
 # Dispatcher
 
 REPORTS = {
@@ -451,6 +490,8 @@ REPORTS = {
     "recurrence": report_recurrence,
     "portfolio-summary": report_portfolio_summary,
     "workstream-summary": report_workstream_summary,
+    "jira-sync": report_jira_sync,
+    "team-summary": report_team_summary,
 }
 
 

@@ -94,6 +94,34 @@ class TestReconciliation:
         assert finding.state == "OPEN"
         assert finding.last_seen == datetime(2026, 4, 9)
 
+    def test_sla_breach_queues_update_and_wakes_delivery(self, db_session, config, run_id):
+        finding = self._make_finding(
+            db_session, first_seen=datetime.now() - timedelta(days=365),
+            jira_ticket_key="PLAT-1", jira_sync_status="SYNCED",
+            jira_next_sync_at=datetime.now() + timedelta(hours=1),
+        )
+        self._make_staged(db_session, run_id)
+        reconcile(db_session, config, run_id)
+        assert finding.sla_status == "BREACHED"
+        assert finding.jira_next_sync_at is None
+        action = db_session.query(JiraActionQueue).one()
+        assert action.action == "UPDATE"
+        assert action.payload["sla_status_change"] == "WITHIN_SLA -> BREACHED"
+
+    def test_first_seen_fixed_has_no_create(self, db_session, config, run_id):
+        self._make_staged(db_session, run_id, tenable_state="FIXED")
+        reconcile(db_session, config, run_id)
+        finding = db_session.query(Finding).one()
+        assert finding.state == "REMEDIATED"
+        assert finding.remediated_at is not None
+        assert db_session.query(JiraActionQueue).count() == 0
+
+    def test_stale_reappears_as_open(self, db_session, config, run_id):
+        finding = self._make_finding(db_session, state="STALE")
+        self._make_staged(db_session, run_id, tenable_state="ACTIVE")
+        reconcile(db_session, config, run_id)
+        assert finding.state == "OPEN"
+
     def test_remediated(self, db_session, config, run_id):
         """A finding in DB as OPEN + staged with Fixed state = REMEDIATED."""
         self._make_finding(db_session, tenable_finding_id="f-fixed")

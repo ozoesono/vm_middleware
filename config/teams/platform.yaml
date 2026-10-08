@@ -1,0 +1,22 @@
+# Example team. Replace selectors and Jira values before enabling it.
+team_id: team-platform
+enabled: false
+match:
+  service_owner_team: [Team-Platform]
+jira:
+  instance: shared
+  project: PLAT
+  issue_type: Task
+  labels: [vm-middleware, team-platform]
+  priority_mapping:
+    CRITICAL: Highest
+    HIGH: High
+    MEDIUM: Medium
+    LOW: Low
+  transitions:
+    close: Done
+    reopen: To Do
+  custom_fields: {}
+ticketing:
+  risk_ratings: [CRITICAL, HIGH]
+  max_creates_per_run: 20

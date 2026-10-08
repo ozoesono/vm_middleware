@@ -162,3 +162,24 @@ class TestEnrichNvdTask:
         result = tasks.enrich_nvd_task(max_cves=25)
 
         assert result["max_fetch"] == 25
+
+
+def test_jira_disabled_does_not_open_database(monkeypatch):
+    monkeypatch.setattr(tasks, "get_engine", lambda: (_ for _ in ()).throw(
+        AssertionError("disabled Jira must not access the database")))
+    assert tasks.sync_jira_task()["skipped"] is True
+
+
+def test_jira_task_reloads_config_every_time(monkeypatch):
+    from tests.jira_helpers import config_for_teams
+    config = config_for_teams()
+    loaded = []
+    def fresh():
+        loaded.append(True)
+        return config
+    monkeypatch.setattr(tasks, "AppConfig", fresh)
+    monkeypatch.setattr(tasks, "get_engine", lambda: "engine")
+    monkeypatch.setattr(tasks, "sync_jira", lambda engine, config: {"skipped": False})
+    assert tasks.sync_jira_task()["skipped"] is False
+    assert tasks.sync_jira_task()["skipped"] is False
+    assert len(loaded) == 2

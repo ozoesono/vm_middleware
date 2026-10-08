@@ -11,6 +11,9 @@ import yaml
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings
 
+from src.common.jira_config import JiraConfig as JiraConfig
+from src.common.jira_config import load_jira_config
+
 
 def _load_env_file(path: Path) -> None:
     """Populate os.environ from a .env file for any keys not already set.
@@ -118,6 +121,7 @@ class ScheduleConfig(BaseModel):
     nvd_interval_minutes: int = 60
     # Daily housekeeping (reap abandoned runs, prune aged STALE findings).
     maintenance_cron: str = "30 5 * * *"
+    jira_interval_seconds: int = Field(default=60, ge=10)
 
 
 class TenableConfig(BaseModel):
@@ -194,24 +198,6 @@ class MaintenanceConfig(BaseModel):
     stale_retention_days: int = 180
 
 
-class JiraConfig(BaseModel):
-    base_url: str = "https://org.atlassian.net"
-    default_project: str = "VULN"
-    issue_type: str = "Task"
-    labels: list[str] = Field(default_factory=lambda: ["vm-middleware"])
-    priority_mapping: dict[str, str] = Field(
-        default_factory=lambda: {
-            "CRITICAL": "Highest",
-            "HIGH": "High",
-            "MEDIUM": "Medium",
-            "LOW": "Low",
-        }
-    )
-    portfolio_project_mapping: dict[str, str] = Field(default_factory=dict)
-    close_transition: str = "Done"
-    reopen_transition: str = "To Do"
-
-
 class AppSettings(BaseSettings):
     """Top-level application settings, sourced from env vars."""
 
@@ -269,8 +255,7 @@ class AppConfig:
         tenable_data = _load_yaml(config_dir, "tenable.yaml").get("tenable", {})
         self.tenable = TenableConfig(**tenable_data)
 
-        jira_data = _load_yaml(config_dir, "jira.yaml").get("jira", {})
-        self.jira = JiraConfig(**jira_data)
+        self.jira = load_jira_config(config_dir)
 
         nvd_data = _load_yaml(config_dir, "nvd.yaml").get("nvd", {})
         self.nvd = NvdConfig(**nvd_data)
