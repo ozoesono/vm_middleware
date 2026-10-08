@@ -1,0 +1,15 @@
+# Disabled example. Replace title, scope, owner and expiry before enabling.
+rules:
+  - id: example-temporary-exception
+    enabled: false
+    owner: unassigned
+    reason: "Example only: replace with the team's justification."
+    expires_at: "2027-01-08T00:00:00Z"
+    match:
+      all:
+        - field: owner_team
+          value: team-platform
+          case_sensitive: false
+        - field: title
+          value: Exact vulnerability title from the findings report
+          case_sensitive: false

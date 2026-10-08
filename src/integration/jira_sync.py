@@ -25,6 +25,7 @@ from src.common.models import (
     JiraSyncLog,
     PipelineRun,
 )
+from src.exclusions.service import apply_policy
 from src.integration.jira_client import JiraClient, JiraError
 from src.integration.payloads import correlation_label, fields_hash, issue_fields
 from src.integration.routing import resolve_route, validate_rollout
@@ -250,7 +251,8 @@ def _sync_batch(session, config, client_factory, clock):
                 )
                 .all()
             ]
-            route = resolve_route(finding, config)
+            apply_policy(session, finding, config, now=now)
+            route = resolve_route(finding, config, now=now)
             finding.jira_last_checked_at = now
             if not finding.jira_binding and not finding.jira_ticket_key:
                 finding.jira_team_id = route.team_id

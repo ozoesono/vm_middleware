@@ -21,11 +21,13 @@ import io
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import case, false, func, or_
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
+from src.common.config import AppConfig
 from src.common.logging import get_logger
 from src.common.models import CveDetails, Finding
+from src.exclusions.policy import DEFAULT_REGISTRIES, Classification
 
 logger = get_logger("csv_reports")
 
@@ -40,8 +42,14 @@ def _apply_filters(query, filters: dict[str, Any] | None):
     risk_rating, severity, state, sla_status, source.
     Values may be a single string or a list (IN filter).
     """
-    if not filters:
-        return query
+    filters = filters or {}
+    policy = filters.get("_exclusion_policy") or AppConfig().exclusions
+    dialect = query.session.get_bind().dialect.name
+    if filters.get("excluded_only"):
+        query = query.filter(or_(
+            policy.sql(Finding, dialect), Finding.processing_status == "PAUSED"))
+    elif not filters.get("include_excluded"):
+        query = query.filter(policy.active_sql(Finding, dialect))
 
     column_map = {
         "portfolio": Finding.portfolio,
@@ -56,6 +64,7 @@ def _apply_filters(query, filters: dict[str, Any] | None):
         "team": Finding.jira_team_id,
         "service_owner_team": Finding.service_owner_team,
         "jira_sync_status": Finding.jira_sync_status,
+        "processing_status": Finding.processing_status,
     }
     for key, value in filters.items():
         col = column_map.get(key)
@@ -83,6 +92,8 @@ def _write_csv(rows: list[dict], fieldnames: list[str]) -> str:
 FINDINGS_COLUMNS = [
     "tenable_finding_id",
     "cve_id",
+    "cve_ids",
+    "plugin_id",
     "title",
     "severity",
     "description",       # NVD description (rich text)
@@ -125,6 +136,11 @@ FINDINGS_COLUMNS = [
     "jira_sync_status",
     "jira_sync_error",
     "jira_last_synced_at",
+    "processing_status",
+    "exclusion_rule_ids",
+    "exclusion_reason",
+    "exclusion_until",
+    "last_observed_at",
 ]
 
 
@@ -372,11 +388,7 @@ def report_portfolio_summary(session: Session, filters: dict | None = None) -> s
 
 # Report: workstream summary (container / host-CVE / cloud-misconfig)
 
-DEFAULT_CONTAINER_PATTERNS = [
-    ".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "quay.io/",
-    "registry.k8s.io/", "public.ecr.aws/", "mcr.microsoft.com/",
-    "container-registry.oracle.com/",
-]
+DEFAULT_CONTAINER_PATTERNS = DEFAULT_REGISTRIES
 
 WORKSTREAM_CONTAINER = "container_image"
 WORKSTREAM_HOST_CVE = "host_cve"
@@ -387,6 +399,7 @@ def classify_workstream(
     asset_name: str | None,
     cve_id: str | None,
     container_patterns: list[str] | None = None,
+    asset_type: str | None = None,
 ) -> str:
     """Bucket a finding into a remediation workstream.
 
@@ -395,9 +408,9 @@ def classify_workstream(
     host_cve         — a CVE on a non-container asset (host/VM); patch the host.
     cloud_misconfig  — a non-container finding with no CVE; a configuration issue.
     """
-    patterns = container_patterns or DEFAULT_CONTAINER_PATTERNS
-    name = (asset_name or "").lower()
-    if name and any(p.lower() in name for p in patterns):
+    classifier = Classification(container_name_patterns=(
+        container_patterns if container_patterns is not None else DEFAULT_CONTAINER_PATTERNS))
+    if classifier.container(asset_type, asset_name):
         return WORKSTREAM_CONTAINER
     return WORKSTREAM_HOST_CVE if cve_id else WORKSTREAM_MISCONFIG
 
@@ -413,9 +426,11 @@ def report_workstream_summary(
     Docker Hub / GHCR / GCR images are counted correctly. Non-container
     findings split into host CVEs (patchable) and cloud misconfigurations.
     """
-    patterns = container_patterns or DEFAULT_CONTAINER_PATTERNS
-    conds = [Finding.asset_name.ilike(f"%{p}%") for p in patterns if p]
-    container_cond = or_(*conds) if conds else false()
+    policy = (filters or {}).get("_exclusion_policy") or AppConfig().exclusions
+    classifier = policy.classification
+    if container_patterns is not None and "_exclusion_policy" not in (filters or {}):
+        classifier = classifier.model_copy(update={"container_name_patterns": container_patterns})
+    container_cond = classifier.container_sql(Finding)
 
     workstream = case(
         (container_cond, WORKSTREAM_CONTAINER),
@@ -452,10 +467,13 @@ def report_workstream_summary(
 
 def report_jira_sync(session: Session, filters: dict | None = None) -> str:
     """Delivery state per finding, including findings that have no Jira ticket."""
+    filters = {"include_excluded": True, **(filters or {})}
     columns = ["id", "tenable_finding_id", "service_owner_team", "jira_team_id",
                "risk_rating", "state", "sla_status", "jira_instance_id", "jira_ticket_key",
                "jira_ticket_url", "jira_ticket_status", "jira_sync_status", "jira_sync_error",
-               "jira_attempts", "jira_last_synced_at", "jira_next_sync_at"]
+               "jira_attempts", "jira_last_synced_at", "jira_next_sync_at",
+               "processing_status", "exclusion_rule_ids", "exclusion_reason", "exclusion_until",
+               "last_observed_at"]
     findings = _apply_filters(session.query(Finding), filters).order_by(Finding.risk_score.desc())
     return _write_csv([{col: getattr(f, col) for col in columns} for f in findings], columns)
 
@@ -482,6 +500,12 @@ def report_team_summary(session: Session, filters: dict | None = None) -> str:
 
 # Dispatcher
 
+
+def report_exclusions(session: Session, filters: dict | None = None) -> str:
+    """Diagnostic report of paused findings; active work reports exclude them."""
+    filters = {**(filters or {}), "excluded_only": True}
+    return report_findings(session, filters)
+
 REPORTS = {
     "findings": report_findings,
     "risk-summary": report_risk_summary,
@@ -492,6 +516,7 @@ REPORTS = {
     "workstream-summary": report_workstream_summary,
     "jira-sync": report_jira_sync,
     "team-summary": report_team_summary,
+    "exclusions": report_exclusions,
 }
 
 
@@ -500,9 +525,13 @@ def generate(
     report_name: str,
     filters: dict | None = None,
     container_patterns: list[str] | None = None,
+    exclusion_policy=None,
 ) -> str:
     """Generate a named report and return the CSV string."""
     fn = REPORTS.get(report_name)
+    filters = dict(filters or {})
+    if exclusion_policy is not None:
+        filters["_exclusion_policy"] = exclusion_policy
     if fn is None:
         raise ValueError(
             f"Unknown report '{report_name}'. Available: {sorted(REPORTS)}"

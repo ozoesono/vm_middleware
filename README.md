@@ -96,6 +96,7 @@ Operational behaviour lives in `config/*.yaml` and can be changed without touchi
 | `rollout.yaml` | Jira pilot teams, scored risk ratings and global creation limit |
 | `jira.yaml` | Jira instances, credential references, delivery switch and retry settings |
 | `teams/*.yaml` | Team ownership selectors, Jira project, workflow, fields and creation limits |
+| `exclusions.yaml`, `exclusions.d/*.yaml` | Asset exclusions and temporary pauses, with scope, reason, owner and expiry |
 
 ### 3. Start the database
 
@@ -196,7 +197,7 @@ continues from its checkpoint. Use `--start-fresh` to override that.
 ```
 
 Reports: `findings`, `risk-summary`, `sla-breaches`, `sla-approaching`, `recurrence`,
-`portfolio-summary`, `workstream-summary`, `jira-sync`, `team-summary`.
+`portfolio-summary`, `workstream-summary`, `jira-sync`, `team-summary`, `exclusions`.
 
 Filters (each repeatable; values OR within a key, keys AND together):
 `--portfolio`, `--service`, `--environment`, `--asset-criticality`, `--risk-rating`,
@@ -204,6 +205,117 @@ Filters (each repeatable; values OR within a key, keys AND together):
 `--jira-sync-status`. With no `--out`, the CSV goes to stdout. `--team` selects the
 canonical team ID recorded when delivery last evaluated the finding; `--owner-team`
 filters the source ownership field and also works before Jira delivery is enabled.
+Active reports omit excluded findings. Use `--include-excluded` for all records or
+`--excluded-only` for matching/paused records. The diagnostic `jira-sync` report
+includes paused findings so operators can inspect their existing ticket links.
+
+### Exclusions and temporary pauses
+
+Exclusions control middleware processing. Tenable continues scanning, and the
+middleware continues ingesting updates for findings already stored, including
+every finding linked to a Jira ticket. A paused finding can therefore become FIXED
+in the stored Tenable data while its Jira ticket remains open. The middleware sends
+no Jira updates, transitions or new tickets for that finding during the pause.
+
+The supplied policy excludes container assets from active searches, prioritisation
+and ticket creation. Classification uses `asset_type` first, including Tenable's
+`containerImage` value. When type is missing or `unknown`, configured registry-name
+patterns provide a fallback. A host/device finding about Docker or Kubernetes is
+still a host finding. Extend `exclusions.classification.container_asset_types` as
+needed for the asset types observed in your estate.
+
+New, untracked findings that match rules using raw source fields are filtered before
+staging. The pipeline counts them in `findings_excluded` and logs counts by rule.
+Tracked findings always continue through ingestion; their source state, VPR, asset
+details and remediation guidance stay current while middleware scoring and Jira
+automation pause. Team-scoped rules run after tag/CSV enrichment and can retain new
+findings as PAUSED with an UNSCORED rating. These controls do not change Tenable's
+scan settings or add server-side filters to the Tenable search request.
+
+Define shared rules in `config/exclusions.yaml` and team-specific rules in
+`config/exclusions.d/*.yaml`. Existing `tenable.exclude_asset_patterns` are also
+evaluated by this policy, preserving those exclusions without dropping updates to
+tracked findings. Rule IDs must be unique across all files.
+
+Prefer a detection ID plus source/team scope, a Tenable finding ID for one specific
+finding, or a CVE with asset/team scope. Exact title matching is supported, but a
+title can change or be shared by unrelated findings. The `plugin_id` report column
+contains Tenable's `finding_detection_id`; copy the actual value rather than
+assuming it is a Nessus plugin number. CVE matching checks the full stored CVE list,
+falling back to `cve_id` for older records until they are refreshed. A CVE match
+applies to the whole finding, including a finding containing several CVEs.
+
+For example, this disabled rule previews a three-month title-based exception:
+
+```yaml
+rules:
+  - id: platform-vendor-fix
+    enabled: false
+    owner: team-platform
+    reason: Awaiting the vendor fix; review at the end of the exception period.
+    expires_at: "2027-01-08T00:00:00Z"
+    match:
+      all:
+        - field: owner_team
+          value: team-platform
+          case_sensitive: false
+        - field: title
+          value: "Replace with the exact title from the findings report"
+          case_sensitive: false
+```
+
+`owner` records who maintains the rule. The `owner_team` condition scopes it to asset
+ownership. Other match fields are `asset_kind` (`container` or `other`), `asset_type`,
+`asset_name`, `asset_id`, `finding_id`, `detection_id`, `cve`, `source`, `portfolio`,
+`service` and `environment`. Rule `finding_id` means the Tenable ID in the
+`tenable_finding_id` report column. Operators are `equals` (the default), `in` with a
+list of values, and `contains`/`starts_with` for asset names or titles. Substring
+matching is literal, not regex. Comparisons are case-sensitive unless configured
+otherwise. Conditions under `all` use AND; those under `any` use OR. When both are
+present, both groups must pass. Any active matching rule pauses processing.
+
+```bash
+# Validate without connecting to the database
+.venv/bin/python scripts/exclusions.py validate
+
+# Inspect a rule's potential matches before enabling it
+.venv/bin/python scripts/exclusions.py preview --rule platform-vendor-fix --limit 20
+
+# Apply current rules to existing records in bounded batches
+.venv/bin/python scripts/exclusions.py apply --all
+
+# Inspect paused findings and their history
+.venv/bin/python scripts/generate_report.py --report exclusions --out exclusions.csv
+.venv/bin/python scripts/exclusions.py history --finding-id <internal-finding-uuid>
+```
+
+The rule-specific preview ignores that rule's enabled flag and expiry when counting
+potential matches; its output marks this explicitly. It also shows the effect of
+the current active policy. Counts cover stored findings. New findings filtered
+before storage are represented by pipeline counters and logs. The history command
+uses the internal `finding_id` returned by preview, not the Tenable ID.
+
+To pause, change the rule to `enabled: true`. To unpause early, set it to `false` or
+remove the rule. Otherwise it expires at the exact timezone-aware `expires_at`
+timestamp. Omitting expiry creates an indefinite exclusion. A finding stays paused
+until all matching active rules have been lifted. An independent Celery task reloads
+the files every `schedule.exclusion_interval_seconds` (60 seconds by default), even
+when Jira is disabled, and processes up to `refresh_batch_size` records per batch.
+Use `apply --all` for an immediate full refresh. In-flight jobs finish using their
+configuration snapshot; new batches read the updated policy.
+
+On release, the middleware rescores the latest stored observation and reuses the
+existing Jira issue. If Tenable reported FIXED during the pause, the next enabled
+Jira sync closes that issue. If it is still active, normal updates resume. No source
+scan is paused or restarted, and lifting a rule does not reset the original
+detection date or grant a new SLA period. The latest score can therefore be overdue
+when the pause ends. Previously untracked findings are reconsidered on the next
+Tenable ingestion run.
+
+Pause/resume decisions are recorded in `exclusion_audit`. Normal reports hide paused
+records until they have been rescored on release, and retention preserves paused
+history. Changes to the exclusion policy or its active expiry set cause a new
+ingestion run instead of resuming an incompatible filtered checkpoint.
 
 ### Jira onboarding
 
@@ -211,7 +323,7 @@ The integration creates one ticket per finding. Multiple teams can share a Jira
 connection, use different projects, or reference separate Jira instances. Team
 onboarding uses YAML and credentials; it needs no Python changes.
 
-Run migration `008` before starting the updated workers or querying the new reports:
+Run migrations through `009` before starting the updated workers or querying the reports:
 
 ```bash
 make db-migrate
@@ -424,9 +536,9 @@ team's credentials, fields and workflows still need pilot validation.
 ## Project layout
 
 ```
-config/         YAML configuration, Jira connections and teams/*.yaml
-db/             Alembic config and migrations (001-008)
-scripts/        CLI entry points: run_local.py, generate_report.py, enrich_nvd.py, jira.py
+config/         YAML configuration, teams/*.yaml and exclusions.d/*.yaml
+db/             Alembic config and migrations (001-009)
+scripts/        CLI entry points, including jira.py and exclusions.py
 src/
   celery_app.py Celery app: Redis broker config + Beat schedule (from schedule.yaml)
   tasks.py      Celery tasks: pipeline, Jira delivery, NVD backfill, maintenance
@@ -436,6 +548,7 @@ src/
   reconciliation/  State machine that diffs a run against stored findings
   reporting/    CSV report builders
   integration/  Jira routing, payloads, HTTP adapter, previews and delivery
+  exclusions/   Shared policy matching, pause/resume state and audit history
   pipeline.py   Orchestrator
 tests/          Unit tests and fixtures
 Dockerfile      Worker/beat image (python:3.12-slim, non-root)

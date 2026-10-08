@@ -57,6 +57,10 @@ def _build_beat_schedule(config: AppConfig) -> dict:
         "task": "src.tasks.sync_jira_task",
         "schedule": float(config.schedule.jira_interval_seconds),
     }
+    entries["exclusion-refresh"] = {
+        "task": "src.tasks.refresh_exclusions_task",
+        "schedule": float(config.schedule.exclusion_interval_seconds),
+    }
     return entries
 
 

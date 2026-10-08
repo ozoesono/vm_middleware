@@ -183,3 +183,14 @@ def test_jira_task_reloads_config_every_time(monkeypatch):
     assert tasks.sync_jira_task()["skipped"] is False
     assert tasks.sync_jira_task()["skipped"] is False
     assert len(loaded) == 2
+
+
+def test_exclusion_refresh_runs_even_when_jira_is_disabled(monkeypatch):
+    monkeypatch.setattr(tasks, "get_session", _fake_session)
+    calls = []
+    def refresh(session, config):
+        calls.append(config.jira.enabled)
+        return {"checked": 1, "paused": 0, "resumed": 1}
+    monkeypatch.setattr(tasks, "refresh_exclusions", refresh)
+    assert tasks.refresh_exclusions_task()["resumed"] == 1
+    assert calls == [False]

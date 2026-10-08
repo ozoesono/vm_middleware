@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import not_, or_
+from sqlalchemy import and_, not_, or_
 from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
@@ -209,9 +209,22 @@ def enrich_unique_cves_for_run(
     """
     api_key = api_key or os.environ.get("NVD_API_KEY")
 
+    from src.common.config import AppConfig
+    from src.common.models import Finding
+    from src.exclusions.policy import ENRICHMENT_FIELDS
+    policy = AppConfig().exclusions
+    raw_policy = policy.model_copy(update={"rules": [r for r in policy.rules if not any(
+        c.field in ENRICHMENT_FIELDS for c in r.match.all + r.match.any
+    )]})
+    dialect = session.get_bind().dialect.name
     cve_rows = (
         session.query(FindingStaging.cve_id)
+        .outerjoin(Finding, Finding.tenable_finding_id == FindingStaging.tenable_finding_id)
         .filter(FindingStaging.run_id == run_id, FindingStaging.cve_id.isnot(None))
+        .filter(or_(
+            and_(Finding.id.isnot(None), policy.active_sql(Finding, dialect)),
+            and_(Finding.id.is_(None), not_(raw_policy.sql(FindingStaging, dialect))),
+        ))
         .distinct()
         .all()
     )
@@ -247,9 +260,13 @@ def distinct_finding_cves(
     from src.common.models import Finding  # local import to avoid cycles
 
     q = session.query(Finding.cve_id).filter(Finding.cve_id.isnot(None))
+    from src.common.config import AppConfig
+    policy = AppConfig().exclusions
+    q = q.filter(policy.active_sql(Finding, session.get_bind().dialect.name))
     if exclude_container and container_patterns:
-        registry_match = or_(*[Finding.asset_name.ilike(f"%{p}%") for p in container_patterns])
-        q = q.filter(or_(Finding.asset_name.is_(None), not_(registry_match)))
+        classifier = policy.classification.model_copy(
+            update={"container_name_patterns": container_patterns})
+        q = q.filter(not_(classifier.container_sql(Finding)))
     return {r[0] for r in q.distinct().all() if r[0]}
 
 

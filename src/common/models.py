@@ -38,6 +38,7 @@ class Finding(Base):
     # Tenable finding data
     title = Column(String(1000), nullable=False)
     cve_id = Column(String(100), nullable=True)
+    cve_ids = Column(JSON(none_as_null=True), nullable=True)
     severity = Column(String(20), nullable=False)  # Critical/High/Medium/Low/Info
     vpr_score = Column(Float, nullable=True)
     acr = Column(Integer, nullable=True)  # Asset Criticality Rating 1-10
@@ -83,6 +84,17 @@ class Finding(Base):
     is_recurrence = Column(Boolean, nullable=False, default=False)
     recurrence_count = Column(Integer, nullable=False, default=0)
 
+    # Middleware eligibility is separate from Tenable lifecycle state.
+    processing_status = Column(
+        String(20), nullable=False, default="ACTIVE", server_default="ACTIVE"
+    )
+    exclusion_rule_ids = Column(JSON(none_as_null=True), nullable=True)
+    exclusion_reason = Column(Text, nullable=True)
+    exclusion_until = Column(DateTime, nullable=True)
+    exclusion_evaluated_at = Column(DateTime, nullable=True)
+    exclusion_policy_hash = Column(String(64), nullable=True)
+    last_observed_at = Column(DateTime, nullable=True)
+
     # Jira linkage
     jira_ticket_key = Column(String(50), nullable=True)
     jira_ticket_status = Column(String(50), nullable=True)
@@ -117,6 +129,7 @@ class Finding(Base):
         Index("ix_findings_jira_ticket_key", "jira_ticket_key"),
         Index("ix_findings_jira_sync_due", "jira_next_sync_at", "jira_last_checked_at"),
         Index("ix_findings_jira_team_id", "jira_team_id"),
+        Index("ix_findings_processing_status", "processing_status"),
         UniqueConstraint("jira_instance_id", "jira_issue_id", name="uq_findings_jira_issue"),
     )
 
@@ -134,6 +147,7 @@ class FindingStaging(Base):
     # Raw Tenable data
     title = Column(String(1000), nullable=False)
     cve_id = Column(String(100), nullable=True)
+    cve_ids = Column(JSON(none_as_null=True), nullable=True)
     severity = Column(String(20), nullable=False)
     vpr_score = Column(Float, nullable=True)
     acr = Column(Integer, nullable=True)
@@ -297,6 +311,8 @@ class PipelineRun(Base):
 
     # Resilience counters
     findings_skipped = Column(Integer, nullable=False, default=0)
+    findings_excluded = Column(Integer, nullable=False, default=0, server_default="0")
+    exclusion_policy_hash = Column(String(64), nullable=True)
     pages_failed = Column(Integer, nullable=False, default=0)
 
     # Heartbeat: bumped on every checkpoint commit (onupdate). Used to detect
@@ -308,6 +324,19 @@ class PipelineRun(Base):
 
 
 # Exceptions (risk acceptance)
+
+
+class ExclusionAudit(Base):
+    """Middleware pause/resume decisions; never marks a finding remediated."""
+
+    __tablename__ = "exclusion_audit"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    finding_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    tenable_finding_id = Column(String(255), nullable=False)
+    action = Column(String(20), nullable=False)
+    rules = Column(JSON, nullable=False)
+    policy_hash = Column(String(64), nullable=False)
+    evaluated_at = Column(DateTime, nullable=False)
 
 
 class CveDetails(Base):

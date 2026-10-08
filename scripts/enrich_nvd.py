@@ -50,7 +50,7 @@ def main():
                         help="Just report how many CVEs still need fetching, then exit.")
     parser.add_argument("--scope", choices=["all", "non-container"], default="all",
                         help="'non-container' fetches only host/VM CVE descriptions, "
-                             "skipping the huge set of container-image CVEs.")
+                             "skipping container-image CVEs. Both scopes respect exclusions.")
     args = parser.parse_args()
 
     settings = AppSettings()

@@ -13,6 +13,7 @@ from src.common.config import AppConfig
 from src.common.db import get_session
 from src.common.logging import get_logger, setup_logging
 from src.common.models import FindingStaging, JiraActionQueue, PipelineRun
+from src.exclusions.service import filter_untracked_findings
 from src.ingestion.enrichment import (
     apply_asset_tags_enrichment,
     apply_enrichment,
@@ -47,7 +48,8 @@ def _append_error(run: PipelineRun, message: str, max_kept: int = 50) -> None:
     run.errors = errs
 
 
-def _stage_page(session, run_id: uuid.UUID, findings: list, exclude_patterns: list | None = None) -> tuple[int, int, bool]:
+def _stage_page(session, run_id: uuid.UUID, findings: list, exclude_patterns: list | None = None,
+                config: AppConfig | None = None) -> tuple[int, int, bool]:
     """Stage one page's findings resiliently.
 
     ingest_findings already does per-record fault tolerance internally.
@@ -57,12 +59,20 @@ def _stage_page(session, run_id: uuid.UUID, findings: list, exclude_patterns: li
     Returns (saved, skipped, page_failed).
     """
     try:
+        excluded = 0
+        if config is not None:
+            findings, excluded = filter_untracked_findings(session, run_id, findings, config)
+            exclude_patterns = None  # Tracked findings keep receiving observations.
         saved, skipped = ingest_findings(
             findings, run_id, session,
             tag_filter=None,
             clear_staging=False,
             exclude_asset_patterns=exclude_patterns,
         )
+        if excluded:
+            run = session.get(PipelineRun, run_id)
+            if run:
+                run.findings_excluded = (run.findings_excluded or 0) + excluded
         return saved, skipped, False
     except Exception as e:
         logger.error("page_stage_failed_skipping", error=str(e)[:200], findings_in_page=len(findings))
@@ -105,7 +115,9 @@ def _setup_or_resume_run(
         if prev is not None:
             prev_tags = sorted(prev.tag_filter or [])
             cur_tags = sorted(config.tenable.tag_filter or [])
-            if prev_tags == cur_tags:
+            current_policy = config.exclusions.run_fingerprint()
+            if prev_tags == cur_tags and prev.exclusion_policy_hash in (None, current_policy):
+                prev.exclusion_policy_hash = current_policy
                 logger.info(
                     "auto_resume_detected_incomplete_run",
                     run_id=str(prev.id),
@@ -136,6 +148,7 @@ def _setup_or_resume_run(
         status="RUNNING",
         trigger=trigger,
         tag_filter=config.tenable.tag_filter,
+        exclusion_policy_hash=config.exclusions.run_fingerprint(),
     )
     session.add(pipeline_run)
     session.flush()
@@ -390,6 +403,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
             batch = asset_ids[batch_idx * batch_size:(batch_idx + 1) * batch_size]
 
             batch_saved = 0
+            batch_fetched = 0
             batch_skipped = 0
             batch_failed = False
 
@@ -415,7 +429,10 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
                 if batch_total is None:
                     batch_total = page.total
 
-                saved, skipped, page_failed = _stage_page(session, run_id, page.findings, config.tenable.exclude_asset_patterns)
+                batch_fetched += len(page.findings)
+
+                saved, skipped, page_failed = _stage_page(
+                    session, run_id, page.findings, config=config)
                 batch_saved += saved
                 batch_skipped += skipped
                 if page_failed:
@@ -429,7 +446,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.last_batch_idx = batch_idx + 1
             run.pages_completed += 1
-            run.findings_fetched = (run.findings_fetched or 0) + batch_saved + batch_skipped
+            run.findings_fetched = (run.findings_fetched or 0) + batch_fetched
             run.findings_skipped = (run.findings_skipped or 0) + batch_skipped
             if batch_failed:
                 run.pages_failed = (run.pages_failed or 0) + 1
@@ -517,7 +534,7 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 session.commit()
 
             # Stage (resilient)
-            saved, skipped, page_failed = _stage_page(session, run_id, page.findings)
+            saved, skipped, page_failed = _stage_page(session, run_id, page.findings, config=config)
 
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.last_offset = offset + len(page.findings)
@@ -561,12 +578,14 @@ def _run_mock(session, config, run_id: uuid.UUID, fixture_path: str) -> None:
         session.commit()
 
         kept = filter_by_tags(raw_findings, config.tenable.tag_filter)
+        kept, excluded = filter_untracked_findings(session, run_id, kept, config)
         saved, skipped = ingest_findings(
             kept, run_id, session, tag_filter=None,
-            exclude_asset_patterns=config.tenable.exclude_asset_patterns,
+            exclude_asset_patterns=None,
         )
         run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
         run.findings_skipped = (run.findings_skipped or 0) + skipped
+        run.findings_excluded = (run.findings_excluded or 0) + excluded
         session.commit()
     finally:
         client.close()
@@ -590,6 +609,7 @@ def _print_summary(run: PipelineRun) -> None:
     print(f"  Last batch idx:    {run.last_batch_idx}")
     print(f"  Findings fetched:  {run.findings_fetched}")
     print(f"  Findings skipped:  {run.findings_skipped}")
+    print(f"  Excluded new:      {run.findings_excluded}")
     print(f"  Expected total:    {run.total_findings_expected}")
     print(f"  New:               {run.findings_new}")
     print(f"  Updated:           {run.findings_updated}")

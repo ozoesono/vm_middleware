@@ -41,3 +41,18 @@ def score_finding(
             asset_criticality_score=asset_criticality_score,
             severity=severity,
         )
+
+
+def score_record(finding, config) -> None:
+    """Score the latest observation without changing its original detection date."""
+    from src.scoring.sla import calculate_sla_due_date, determine_sla_status
+
+    result = score_finding(config.scoring, finding.vpr_score, finding.asset_criticality_score,
+                           finding.acr, finding.aes, finding.severity)
+    finding.risk_model, finding.risk_score, finding.risk_rating = (
+        result.risk_model, result.risk_score, result.risk_rating,
+    )
+    finding.sla_days, finding.sla_due_date = calculate_sla_due_date(
+        finding.first_seen, result.risk_rating, config.sla,
+    )
+    finding.sla_status = determine_sla_status(finding.sla_due_date, config.sla)

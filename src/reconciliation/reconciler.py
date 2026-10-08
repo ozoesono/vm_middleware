@@ -13,21 +13,22 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-
-def _utcnow() -> datetime:
-    """Return current UTC time as a naive datetime (consistent with DB storage)."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
 from sqlalchemy.orm import Session
 
 from src.common.config import AppConfig
 from src.common.logging import get_logger
 from src.common.models import Finding, FindingStaging, JiraActionQueue, PipelineRun
+from src.exclusions.service import apply_policy
 from src.ingestion.enrichment import CRITICALITY_SCORES
-from src.scoring.engine import score_finding
-from src.scoring.sla import calculate_sla_due_date, determine_sla_status
+from src.scoring.engine import score_record
+from src.scoring.sla import determine_sla_status
 
 logger = get_logger("reconciler")
+
+
+def _utcnow() -> datetime:
+    """Return current UTC time as a naive datetime (consistent with DB storage)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -101,6 +102,9 @@ def reconcile(
             staged_processed.add(finding.tenable_finding_id)
             _process_existing_with_staged(finding, staged, config, run_id, session, stats)
         elif allow_stale:
+            apply_policy(session, finding, config)
+            # Tracked findings are never dropped by the exclusion filter, so
+            # an actual absence can still update source state while Jira pauses.
             _process_missing_finding(finding, config, run_id, stats)
 
     # Check REMEDIATED findings: recurrence or still fixed
@@ -108,6 +112,7 @@ def reconcile(
     for finding in remediated_findings:
         staged = staged_lookup.get(finding.tenable_finding_id)
         if staged is not None:
+            _observe_finding(finding, staged, config, run_id, session)
             staged_processed.add(finding.tenable_finding_id)
             state_upper = (staged.tenable_state or "").upper()
             if state_upper in ("ACTIVE", "RESURFACED", "NEW"):
@@ -165,26 +170,8 @@ def _score_and_sla(
     config: AppConfig,
 ) -> None:
     """Apply scoring and SLA calculation to a finding."""
-    result = score_finding(
-        config=config.scoring,
-        vpr_score=finding.vpr_score,
-        asset_criticality_score=finding.asset_criticality_score,
-        acr=finding.acr,
-        aes=finding.aes,
-        severity=finding.severity,
-    )
-    finding.risk_model = result.risk_model
-    finding.risk_score = result.risk_score
-    finding.risk_rating = result.risk_rating
-
-    sla_days, sla_due_date = calculate_sla_due_date(
-        first_seen=finding.first_seen,
-        risk_rating=result.risk_rating,
-        sla_config=config.sla,
-    )
-    finding.sla_days = sla_days
-    finding.sla_due_date = sla_due_date
-    finding.sla_status = determine_sla_status(sla_due_date, config.sla)
+    if finding.processing_status != "PAUSED":
+        score_record(finding, config)
 
 
 def _apply_enrichment_to_finding(finding: Finding, enrichment: dict) -> None:
@@ -207,9 +194,11 @@ def _queue_jira_action(
     finding_id: uuid.UUID,
     action: str,
     payload: dict | None = None,
-) -> None:
+) -> bool:
     """Add an action to the Jira action queue."""
     finding = session.get(Finding, finding_id)
+    if finding and finding.processing_status == "PAUSED":
+        return False
     if finding and finding.jira_sync_status not in ("RETRY", "UNCERTAIN", "FAILED"):
         finding.jira_next_sync_at = None
     session.add(JiraActionQueue(
@@ -219,9 +208,28 @@ def _queue_jira_action(
         action=action,
         payload=payload or {},
     ))
+    return True
 
 
 # Reconciliation handlers for each case
+
+
+def _observe_finding(finding, staged, config, run_id, session):
+    """Keep source observations current even when middleware processing is paused."""
+    for field_name in (
+        "title", "cve_id", "cve_ids", "severity", "source", "plugin_id", "solution",
+        "asset_name", "asset_type", "tenable_asset_id", "asset_ip", "asset_hostname",
+        "vpr_score", "acr", "aes",
+        "epss_score", "exploit_maturity", "cvssv3_score", "tenable_state",
+    ):
+        value = getattr(staged, field_name)
+        if value is not None and value != "":
+            setattr(finding, field_name, value)
+    finding.last_seen = staged.last_seen or finding.last_seen
+    finding.last_observed_at = _utcnow()
+    finding.last_run_id = run_id
+    _apply_enrichment_to_finding(finding, _extract_enrichment(staged))
+    apply_policy(session, finding, config)
 
 
 def _process_existing_with_staged(
@@ -233,6 +241,9 @@ def _process_existing_with_staged(
     stats: ReconciliationStats,
 ) -> None:
     """Process a finding that exists in both DB and current staging."""
+    old_sla_status = finding.sla_status
+    old_risk_rating = finding.risk_rating
+    _observe_finding(finding, staged, config, run_id, session)
     tenable_state = (staged.tenable_state or "ACTIVE").upper()
 
     if tenable_state == "FIXED":
@@ -248,17 +259,15 @@ def _process_existing_with_staged(
             delta = _utcnow() - finding.first_seen
             finding.time_to_fix_days = delta.days
 
-        _queue_jira_action(session, run_id, finding.id, "CLOSE", {
+        queued = _queue_jira_action(session, run_id, finding.id, "CLOSE", {
             "reason": "Vulnerability confirmed remediated by Tenable",
             "time_to_fix_days": finding.time_to_fix_days,
         })
         stats.findings_remediated += 1
-        stats.jira_actions_created += 1
+        stats.jira_actions_created += int(queued)
 
     else:
         # STILL OPEN: update with latest data
-        old_sla_status = finding.sla_status
-        old_risk_rating = finding.risk_rating
         finding.state = "OPEN"
         finding.tenable_state = tenable_state
         finding.last_seen = staged.last_seen or finding.last_seen
@@ -277,6 +286,9 @@ def _process_existing_with_staged(
 
         # Re-score
         _score_and_sla(finding, config)
+        if finding.processing_status == "PAUSED":
+            stats.findings_updated += 1
+            return
 
         # Check if SLA status changed — queue UPDATE if it did
         new_sla_status = determine_sla_status(finding.sla_due_date, config.sla)
@@ -285,11 +297,11 @@ def _process_existing_with_staged(
         if finding.jira_ticket_key and (
             old_sla_status != new_sla_status or old_risk_rating != finding.risk_rating
         ):
-            _queue_jira_action(session, run_id, finding.id, "UPDATE", {
+            queued = _queue_jira_action(session, run_id, finding.id, "UPDATE", {
                 "sla_status_change": f"{old_sla_status} -> {new_sla_status}",
                 "risk_score": finding.risk_score,
             })
-            stats.jira_actions_created += 1
+            stats.jira_actions_created += int(queued)
 
         stats.findings_updated += 1
 
@@ -348,7 +360,7 @@ def _process_recurrence(
     # Re-score with new SLA from today
     _score_and_sla(finding, config)
 
-    _queue_jira_action(session, run_id, finding.id, "REOPEN", {
+    queued = _queue_jira_action(session, run_id, finding.id, "REOPEN", {
         "reason": "Vulnerability has resurfaced after previous remediation",
         "recurrence_count": finding.recurrence_count,
         "previous_remediation_date": str(finding.jira_closed_at) if finding.jira_closed_at else None,
@@ -356,7 +368,7 @@ def _process_recurrence(
     # Delivery records when Jira actually reopens, independently of Tenable state.
 
     stats.findings_recurred += 1
-    stats.jira_actions_created += 1
+    stats.jira_actions_created += int(queued)
     logger.info(
         "finding_recurrence",
         tenable_finding_id=finding.tenable_finding_id,
@@ -388,6 +400,7 @@ def _process_new_finding(
         tenable_asset_id=staged.tenable_asset_id,
         title=staged.title,
         cve_id=staged.cve_id,
+        cve_ids=staged.cve_ids,
         severity=staged.severity,
         vpr_score=staged.vpr_score,
         acr=staged.acr,
@@ -418,10 +431,11 @@ def _process_new_finding(
         service_owner_team=enrichment.get("service_owner_team"),
     )
 
-    # Score and SLA
-    _score_and_sla(finding, config)
-
     session.add(finding)
+    _observe_finding(finding, staged, config, run_id, session)
+
+    # Score and SLA (source observations remain current while paused)
+    _score_and_sla(finding, config)
 
     if finding.state == "REMEDIATED":
         finding.remediated_at = staged.last_seen or _utcnow()
@@ -430,8 +444,12 @@ def _process_new_finding(
         stats.findings_new += 1
         return
 
+    if finding.processing_status == "PAUSED":
+        stats.findings_new += 1
+        return
+
     # Queue Jira ticket creation
-    _queue_jira_action(session, run_id, finding.id, "CREATE", {
+    queued = _queue_jira_action(session, run_id, finding.id, "CREATE", {
         "title": finding.title,
         "cve_id": finding.cve_id,
         "risk_rating": finding.risk_rating,
@@ -442,4 +460,4 @@ def _process_new_finding(
     })
 
     stats.findings_new += 1
-    stats.jira_actions_created += 1
+    stats.jira_actions_created += int(queued)

@@ -62,7 +62,9 @@ def test_workstream_summary_report(db_session):
     _finding(db_session, tenable_asset_id="role1", asset_name="iam-role-x", cve_id=None)
     _finding(db_session, tenable_asset_id="role2", asset_name="iam-role-y", cve_id=None, state="STALE")
 
-    csv_out = report_workstream_summary(db_session)
+    active_csv = report_workstream_summary(db_session)
+    assert "container_image" not in active_csv
+    csv_out = report_workstream_summary(db_session, {"include_excluded": True})
     rows = {r.split(",")[0]: r.split(",") for r in csv_out.strip().splitlines()[1:]}
 
     assert set(rows) == {"container_image", "host_cve", "cloud_misconfig"}

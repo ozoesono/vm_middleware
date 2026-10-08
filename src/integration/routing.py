@@ -17,7 +17,19 @@ class Route:
     team: JiraTeam | None = None
 
 
-def resolve_route(finding: Finding, config: AppConfig) -> Route:
+def resolve_route(finding: Finding, config: AppConfig, *, now=None) -> Route:
+    route = _resolve_base_route(finding, config)
+    rules = config.exclusions.matching_rules(finding, now)
+    if rules:
+        route.status = "PAUSED"
+        route.reason = "; ".join(f"{r.id}: {r.reason}" for r in rules)
+    elif finding.processing_status == "PAUSED":
+        route.status = "RESUME_PENDING"
+        route.reason = "policy refresh will resume from the latest observation"
+    return route
+
+
+def _resolve_base_route(finding: Finding, config: AppConfig) -> Route:
     if finding.jira_binding:
         binding = finding.jira_binding
         destination = JiraDestination.model_validate(binding["destination"])

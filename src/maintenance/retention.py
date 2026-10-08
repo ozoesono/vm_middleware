@@ -123,6 +123,7 @@ def prune_stale_findings(
     retention_days: int,
     dry_run: bool = True,
     now: datetime | None = None,
+    exclusion_policy=None,
 ) -> dict:
     """Delete STALE findings not seen for longer than retention_days.
 
@@ -138,11 +139,15 @@ def prune_stale_findings(
     """
     now = now or _utcnow()
     cutoff = now - timedelta(days=retention_days)
+    if exclusion_policy is None:
+        from src.common.config import AppConfig
+        exclusion_policy = AppConfig().exclusions
     last_activity = func.coalesce(Finding.last_seen, Finding.updated_at, Finding.created_at)
 
     total_stale = session.query(Finding).filter(Finding.state == "STALE").count()
     eligible_q = session.query(Finding).filter(
         Finding.state == "STALE",
+        exclusion_policy.active_sql(Finding, session.get_bind().dialect.name, now),
         last_activity < cutoff,
         Finding.jira_ticket_key.is_(None),
         Finding.jira_binding.is_(None),

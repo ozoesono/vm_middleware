@@ -1,0 +1,16 @@
+exclusions:
+  enabled: true
+  refresh_batch_size: 1000
+  classification:
+    container_asset_types: [containerImage, container, container_image, container-image]
+    # Registry name fallbacks come from tenable.container_registry_patterns.
+    # They apply only when asset_type is missing or "unknown".
+  rules:
+    - id: container-assets
+      enabled: true
+      owner: unassigned  # Set the team responsible for this scope decision.
+      reason: Container assets are outside the middleware remediation scope.
+      match:
+        all:
+          - field: asset_kind
+            value: container

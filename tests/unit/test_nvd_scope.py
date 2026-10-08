@@ -29,10 +29,10 @@ def _seed(session):
     _f(session, None, "CVE-2024-4")                                          # null asset -> non-container
 
 
-def test_all_scope_returns_every_cve(db_session):
+def test_all_scope_still_respects_global_exclusions(db_session):
     _seed(db_session)
     got = distinct_finding_cves(db_session, exclude_container=False)
-    assert got == {"CVE-2024-1", "CVE-2024-2", "CVE-2024-3", "CVE-2024-4"}
+    assert got == {"CVE-2024-2", "CVE-2024-3", "CVE-2024-4"}
 
 
 def test_non_container_scope_drops_container_only_cves(db_session):
@@ -43,7 +43,7 @@ def test_non_container_scope_drops_container_only_cves(db_session):
     assert got == {"CVE-2024-2", "CVE-2024-3", "CVE-2024-4"}
 
 
-def test_exclude_without_patterns_is_noop(db_session):
+def test_no_optional_patterns_does_not_disable_global_policy(db_session):
     _seed(db_session)
     got = distinct_finding_cves(db_session, exclude_container=True, container_patterns=None)
-    assert got == {"CVE-2024-1", "CVE-2024-2", "CVE-2024-3", "CVE-2024-4"}
+    assert got == {"CVE-2024-2", "CVE-2024-3", "CVE-2024-4"}

@@ -53,6 +53,9 @@ def main():
     parser.add_argument("--team", action="append", help="canonical team_id recorded by Jira sync")
     parser.add_argument("--owner-team", action="append", dest="service_owner_team")
     parser.add_argument("--jira-sync-status", action="append", dest="jira_sync_status")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--include-excluded", action="store_true")
+    scope.add_argument("--excluded-only", action="store_true")
 
     args = parser.parse_args()
 
@@ -78,6 +81,10 @@ def main():
 
     settings = AppSettings()
     config = AppConfig(settings=settings)
+    if args.include_excluded:
+        filters["include_excluded"] = True
+    if args.excluded_only:
+        filters["excluded_only"] = True
     init_db(settings.database_url)
 
     with get_session() as session:
@@ -85,6 +92,7 @@ def main():
             output = csv_reports.generate(
                 session, args.report, filters or None,
                 container_patterns=config.tenable.container_registry_patterns,
+                exclusion_policy=config.exclusions,
             )
         except ValueError as e:
             parser.error(str(e))

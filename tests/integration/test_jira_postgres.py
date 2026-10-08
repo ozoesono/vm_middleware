@@ -96,3 +96,52 @@ def test_postgres_delivery_replay_and_budget(migrated_engine, monkeypatch):
     assert len(server.creates) == 1
     with Session(engine) as session:
         assert session.query(JiraCreationBudget).one().reserved == 1
+
+
+def test_exclusion_migration_pause_json_cve_match_and_resume(migrated_engine):
+    from datetime import timedelta, timezone
+
+    from src.common.models import ExclusionAudit
+    from src.exclusions.policy import ExclusionPolicy
+    from src.exclusions.service import refresh_exclusions
+
+    engine, cfg = migrated_engine
+    config = config_for_teams()
+    expiry = (NOW + timedelta(days=90)).replace(tzinfo=timezone.utc)
+    config.exclusions = ExclusionPolicy.model_validate(
+        {
+            "rules": [
+                {
+                    "id": "scoped-cve",
+                    "owner": "team-platform",
+                    "reason": "Vendor fix pending",
+                    "expires_at": expiry,
+                    "match": {
+                        "all": [
+                            {"field": "cve", "value": "CVE-2026-2222"},
+                            {"field": "owner_team", "value": "team-platform"},
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+    with Session(engine) as session:
+        run = seed_run(session)
+        fid = seed_finding(
+            session, run, cve_id="CVE-2026-1111", cve_ids=["CVE-2026-1111", "CVE-2026-2222"]
+        )
+        query = session.query(Finding).filter(config.exclusions.sql(Finding, "postgresql", NOW))
+        assert query.one().id == fid
+        assert refresh_exclusions(session, config, now=NOW)["paused"] == 1
+        session.commit()
+        assert session.get(Finding, fid).processing_status == "PAUSED"
+        assert refresh_exclusions(session, config, now=expiry)["resumed"] == 1
+        session.commit()
+        assert session.get(Finding, fid).first_seen == NOW
+        assert session.query(ExclusionAudit).count() == 2
+    command.downgrade(cfg, "008")
+    assert "processing_status" not in {c["name"] for c in inspect(engine).get_columns("findings")}
+    command.upgrade(cfg, "head")
+    with Session(engine) as session:
+        assert session.get(Finding, fid).processing_status == "ACTIVE"

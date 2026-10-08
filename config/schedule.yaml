@@ -5,3 +5,4 @@ schedule:
   nvd_interval_minutes: 60   # NVD backfill: fetch a bounded chunk every hour
   maintenance_cron: "30 5 * * *"  # Reap/prune: daily at 05:30 UTC
   jira_interval_seconds: 60    # Worker reads Jira/team YAML afresh each tick
+  exclusion_interval_seconds: 60  # Reload exclusions, apply pauses and release expired rules

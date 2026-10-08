@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings
 
 from src.common.jira_config import JiraConfig as JiraConfig
 from src.common.jira_config import load_jira_config
+from src.exclusions.policy import load_policy
 
 
 def _load_env_file(path: Path) -> None:
@@ -122,6 +123,7 @@ class ScheduleConfig(BaseModel):
     # Daily housekeeping (reap abandoned runs, prune aged STALE findings).
     maintenance_cron: str = "30 5 * * *"
     jira_interval_seconds: int = Field(default=60, ge=10)
+    exclusion_interval_seconds: int = Field(default=60, ge=10)
 
 
 class TenableConfig(BaseModel):
@@ -254,6 +256,9 @@ class AppConfig:
 
         tenable_data = _load_yaml(config_dir, "tenable.yaml").get("tenable", {})
         self.tenable = TenableConfig(**tenable_data)
+
+        self.exclusions = load_policy(config_dir, self.tenable.exclude_asset_patterns,
+                                      self.tenable.container_registry_patterns)
 
         self.jira = load_jira_config(config_dir)
 

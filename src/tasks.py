@@ -18,6 +18,7 @@ from src.celery_app import celery_app
 from src.common.config import AppConfig, get_config
 from src.common.db import get_engine, get_session
 from src.common.logging import get_logger, setup_logging
+from src.exclusions.service import refresh_exclusions
 from src.ingestion.nvd_enrichment import enrich_cves_from_findings
 from src.integration.jira_sync import sync_jira
 from src.maintenance.retention import prune_stale_findings, reap_stale_runs
@@ -41,6 +42,14 @@ def sync_jira_task() -> dict:
     return sync_jira(get_engine(), config)
 
 
+@celery_app.task(name="src.tasks.refresh_exclusions_task")
+def refresh_exclusions_task() -> dict:
+    """Apply edited rules and expiry even when Jira delivery is disabled."""
+    config = AppConfig()
+    with get_session() as session:
+        return refresh_exclusions(session, config)
+
+
 def _redis_client() -> redis.Redis:
     return redis.Redis.from_url(get_config().settings.redis_url)
 
@@ -53,7 +62,7 @@ def run_pipeline_task(start_fresh: bool = False) -> dict:
     the in-flight run is already checkpointing progress, and the next tick
     picks up again.
     """
-    config = get_config()
+    config = AppConfig()
     setup_logging(config.settings.log_level)
 
     lock = _redis_client().lock(

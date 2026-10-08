@@ -154,6 +154,8 @@ def normalise_finding(finding: dict[str, Any], run_id: uuid.UUID) -> FindingStag
         # Finding details
         title=str(finding.get("name", "Unknown")),
         cve_id=cve_id,
+        cve_ids=[str(cve) for cve in cve_list] if isinstance(cve_list, list)
+                else [str(cve_list)] if cve_list else None,
         severity=str(finding.get("severity", "Info")),
         vpr_score=_safe_float(extra.get("finding_vpr_score")),
         acr=None,   # Not available in Inventory API
