@@ -37,7 +37,6 @@ def apply_policy(session, finding, config, *, now=None, rescore_on_release=True)
     finding.exclusion_policy_hash = config.exclusions.fingerprint
     if rules:
         finding.jira_sync_status = "PAUSED"
-        # New findings can be retained when a team-scoped rule needs enrichment.
         if finding.risk_rating is None:
             finding.risk_rating, finding.risk_model = "UNSCORED", "not_scored"
             finding.risk_score, finding.sla_days, finding.sla_status = 0, 0, "NOT_SCORED"
@@ -134,7 +133,7 @@ def filter_untracked_findings(session, run_id, raw_findings, config, *, now=None
             if rules:
                 matches[index] = (staged.tenable_finding_id, [rule.id for rule in rules])
         except (ValueError, TypeError, AttributeError):
-            pass  # Let the existing resilient ingestion path report malformed rows.
+            pass  # Ingestion reports malformed records.
     if not matches:
         return raw_findings, 0
     tracked = {

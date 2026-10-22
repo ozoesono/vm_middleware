@@ -20,7 +20,6 @@ def upgrade() -> None:
         "pipeline_runs",
         sa.Column("updated_at", sa.DateTime, nullable=True, server_default=sa.func.now()),
     )
-    # Backfill existing rows so the reaper has a progress timestamp to key off.
     op.execute("UPDATE pipeline_runs SET updated_at = started_at WHERE updated_at IS NULL")
 
 

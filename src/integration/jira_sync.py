@@ -132,8 +132,7 @@ def _sync_existing(session, finding, client, route, fields, action, now):
     finding.jira_ticket_status = status["name"]
     transitions = route.destination.transitions
     active = finding.state == "OPEN" and (finding.tenable_state or "").upper() != "FIXED"
-    # Some Jira workflows prohibit editing resolved issues. Reopen first, then
-    # update content. Already-resolved fixed/stale issues only have status polled.
+    # Resolved issues may be read-only; reopen before editing.
     reopened = False
     if active and category == "done":
         action.action = "REOPEN"
@@ -143,7 +142,6 @@ def _sync_existing(session, finding, client, route, fields, action, now):
         if category not in ("new", "indeterminate"):
             raise JiraError("reopen transition did not leave the Done category")
         reopened = True
-    # Refresh fields independently from workflow state. Never move an issue's project.
     digest = fields_hash(fields)
     if digest != finding.jira_synced_hash and category != "done":
         if not reopened:
@@ -160,7 +158,7 @@ def _sync_existing(session, finding, client, route, fields, action, now):
         finding.jira_closed_at = finding.jira_closed_at or now
     elif active:
         finding.jira_closed_at = None
-    # STALE findings never drive close or reopen: absence is not remediation evidence.
+    # Missing scan data is not evidence of remediation.
     finding.jira_ticket_status = issue["fields"]["status"]["name"]
 
 
@@ -337,7 +335,6 @@ def _sync_batch(session, config, client_factory, clock):
                         counts["uncertain"] += 1
                         continue
                     elif route.status == "BOUND":
-                        # Binding without a ticket/marker is deliberately not a new create.
                         raise JiraError("bound finding has no ticket; operator recovery required")
                     else:
                         client.validate_fields(route.destination, fields)
@@ -369,7 +366,7 @@ def _sync_batch(session, config, client_factory, clock):
                         finding.jira_sync_status = "UNCERTAIN"
                         action.action = "CREATE"
                         action.payload = {"fields": fields}
-                        # Marker, destination, reservation and action survive worker death.
+                        # Commit the CREATE marker before making the request.
                         session.commit()
                         try:
                             issue = client.create_issue(fields)
@@ -379,7 +376,6 @@ def _sync_batch(session, config, client_factory, clock):
                                 finding.jira_binding = None
                                 budget = session.get(JiraCreationBudget, (run_id, route.team_id))
                                 budget.reserved -= 1
-                                # Jira rejected the POST: retry may route afresh.
                             raise
                         _link(finding, issue, route, now)
                         finding.jira_synced_hash = fields_hash(fields)

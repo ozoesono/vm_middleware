@@ -170,7 +170,6 @@ class TestReconciliation:
         self._make_finding(
             db_session, tenable_finding_id="f-stale", last_seen=old_last_seen
         )
-        # The scan returned data (just not this finding), so staging is non-empty.
         self._make_staged(db_session, run_id, tenable_finding_id="f-other")
 
         stats = reconcile(db_session, config, run_id)
@@ -203,7 +202,6 @@ class TestReconciliation:
         old = datetime.now() - timedelta(days=config.tenable.stale_threshold_days + 5)
         self._make_finding(db_session, tenable_finding_id="f-1", last_seen=old)
         self._make_finding(db_session, tenable_finding_id="f-2", last_seen=old)
-        # No staged findings at all — the pull returned nothing.
 
         stats = reconcile(db_session, config, run_id)
 
@@ -220,13 +218,10 @@ class TestReconciliation:
             asset_ids_for_run={"ids": ["asset-A"], "tags": {}},
         ))
         old = datetime.now() - timedelta(days=config.tenable.stale_threshold_days + 5)
-        # In scope, missing from this run's scan -> STALE
         self._make_finding(db_session, tenable_finding_id="f-a-gone",
                            tenable_asset_id="asset-A", last_seen=old)
-        # Out of scope (an asset this run never pulled) -> must stay OPEN
         self._make_finding(db_session, tenable_finding_id="f-b-safe",
                            tenable_asset_id="asset-B", last_seen=old)
-        # Something WAS returned for asset-A, so staging is non-empty
         self._make_staged(db_session, run_id, tenable_finding_id="f-a-present",
                           tenable_asset_id="asset-A")
 
@@ -238,15 +233,11 @@ class TestReconciliation:
 
     def test_multiple_findings_mixed(self, db_session, config, run_id):
         """Test a mix of new, updated, remediated, and stale findings."""
-        # Existing OPEN finding that will be updated
         self._make_finding(db_session, tenable_finding_id="f-update")
-        # Existing OPEN finding that will be remediated
         self._make_finding(db_session, tenable_finding_id="f-fix")
-        # Existing OPEN finding that will go stale
         old = datetime.now() - timedelta(days=30)
         self._make_finding(db_session, tenable_finding_id="f-gone", last_seen=old)
 
-        # Staged: update + fix + new
         self._make_staged(db_session, run_id, tenable_finding_id="f-update", tenable_state="ACTIVE")
         self._make_staged(db_session, run_id, tenable_finding_id="f-fix", tenable_state="FIXED")
         self._make_staged(db_session, run_id, tenable_finding_id="f-brand-new")

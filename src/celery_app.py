@@ -51,8 +51,7 @@ def _build_beat_schedule(config: AppConfig) -> dict:
         "task": "src.tasks.maintenance_task",
         "schedule": _crontab(config.schedule.maintenance_cron),
     }
-    # The task reads jira.enabled afresh, so team configuration can be reloaded
-    # without restarting Beat. A disabled integration makes no database/API calls.
+    # Read jira.enabled in the task so config edits do not require a Beat restart.
     entries["jira-sync"] = {
         "task": "src.tasks.sync_jira_task",
         "schedule": float(config.schedule.jira_interval_seconds),
@@ -77,8 +76,7 @@ celery_app.conf.update(
     timezone=_config.schedule.timezone,
     task_track_started=True,
     task_acks_late=True,
-    # Recycle worker processes periodically — a full-estate ingestion run can
-    # hold hundreds of MB of staged rows; this stops slow memory growth.
+    # Recycle workers to release memory retained after large ingestion runs.
     worker_max_tasks_per_child=50,
     broker_connection_retry_on_startup=True,
     beat_schedule=_build_beat_schedule(_config),

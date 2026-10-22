@@ -32,9 +32,6 @@ from src.exclusions.policy import DEFAULT_REGISTRIES, Classification
 logger = get_logger("csv_reports")
 
 
-# Filtering helper
-
-
 def _apply_filters(query, filters: dict[str, Any] | None):
     """Apply optional column filters to a Finding query.
 
@@ -87,8 +84,6 @@ def _write_csv(rows: list[dict], fieldnames: list[str]) -> str:
     return buf.getvalue()
 
 
-# Report: full findings export
-
 FINDINGS_COLUMNS = [
     "tenable_finding_id",
     "cve_id",
@@ -96,10 +91,10 @@ FINDINGS_COLUMNS = [
     "plugin_id",
     "title",
     "severity",
-    "description",       # NVD description (rich text)
-    "solution",          # Combined remediation guidance
-    "references",        # Vendor advisory URLs (newline-separated)
-    "cwe",               # NVD weakness type
+    "description",
+    "solution",
+    "references",
+    "cwe",
     "vpr_score",
     "cvssv3_score",
     "risk_model",
@@ -153,7 +148,6 @@ def _format_solution(finding: Finding, cve: CveDetails | None) -> str:
     if finding.solution and finding.solution.strip():
         parts.append(finding.solution.strip())
     elif cve and cve.description:
-        # No Tenable solution — give the resolver something actionable
         parts.append(
             f"No vendor-specific solution available from Tenable. "
             f"Refer to vendor advisories (links below) for remediation steps "
@@ -161,10 +155,9 @@ def _format_solution(finding: Finding, cve: CveDetails | None) -> str:
             f"affected component to a patched version."
         )
 
-    # Always include references — they contain the concrete fix steps
     if cve and cve.references:
         ref_lines = []
-        for ref in cve.references[:8]:  # cap at 8 to keep CSV readable
+        for ref in cve.references[:8]:
             if isinstance(ref, dict) and ref.get("url"):
                 ref_lines.append(f"- {ref['url']}")
         if ref_lines:
@@ -179,20 +172,16 @@ def _format_description(finding: Finding, cve: CveDetails | None) -> str:
     """
     parts = []
 
-    # 1. Identity line
     header = f"{finding.cve_id or finding.title or 'Finding'}"
     if finding.severity:
         header += f"  •  Severity: {finding.severity}"
     parts.append(header)
 
-    # 2. NVD description (the real explanation)
     if cve and cve.description:
         parts.append(cve.description.strip())
     elif finding.title and finding.title != finding.cve_id:
-        # Tenable name is sometimes more than just a CVE id
         parts.append(finding.title)
 
-    # 3. Context
     ctx_bits = []
     if cve and cve.cvss_v3_score is not None:
         ctx_bits.append(f"CVSS v3: {cve.cvss_v3_score}")
@@ -205,7 +194,6 @@ def _format_description(finding: Finding, cve: CveDetails | None) -> str:
     if ctx_bits:
         parts.append("  •  ".join(ctx_bits))
 
-    # 4. Affected asset
     if finding.asset_name:
         asset_line = f"Affected asset: {finding.asset_name}"
         if finding.asset_ip:
@@ -248,9 +236,6 @@ def report_findings(session: Session, filters: dict | None = None) -> str:
     return _write_csv(rows, FINDINGS_COLUMNS)
 
 
-# Report: risk summary (risk_rating x portfolio x criticality)
-
-
 def report_risk_summary(session: Session, filters: dict | None = None) -> str:
     """Counts grouped by risk_rating, portfolio, and asset_criticality."""
     q = _apply_filters(
@@ -285,8 +270,6 @@ def report_risk_summary(session: Session, filters: dict | None = None) -> str:
     )
 
 
-# Report: SLA breaches / approaching
-
 SLA_COLUMNS = [
     "tenable_finding_id", "cve_id", "title", "risk_rating", "risk_score",
     "asset_name", "portfolio", "service", "environment", "asset_criticality",
@@ -315,8 +298,6 @@ def report_sla_approaching(session: Session, filters: dict | None = None) -> str
     return _write_csv(rows, SLA_COLUMNS)
 
 
-# Report: recurrence
-
 RECURRENCE_COLUMNS = [
     "tenable_finding_id", "cve_id", "title", "risk_rating", "asset_name",
     "portfolio", "service", "recurrence_count", "remediated_at",
@@ -333,9 +314,6 @@ def report_recurrence(session: Session, filters: dict | None = None) -> str:
     rows = [{c: getattr(x, c, None) for c in RECURRENCE_COLUMNS} for x in q.all()]
     logger.info("report_recurrence_generated", rows=len(rows))
     return _write_csv(rows, RECURRENCE_COLUMNS)
-
-
-# Report: portfolio summary
 
 
 def report_portfolio_summary(session: Session, filters: dict | None = None) -> str:
@@ -385,8 +363,6 @@ def report_portfolio_summary(session: Session, filters: dict | None = None) -> s
         "open", "remediated", "sla_breached", "avg_risk_score",
     ])
 
-
-# Report: workstream summary (container / host-CVE / cloud-misconfig)
 
 DEFAULT_CONTAINER_PATTERNS = DEFAULT_REGISTRIES
 
@@ -496,9 +472,6 @@ def report_team_summary(session: Session, filters: dict | None = None) -> str:
                       else_=0)).label("delivery_errors"),
     ), filters).group_by(Finding.jira_team_id, Finding.service_owner_team)
     return _write_csv([dict(row._mapping) for row in query], columns)
-
-
-# Dispatcher
 
 
 def report_exclusions(session: Session, filters: dict | None = None) -> str:

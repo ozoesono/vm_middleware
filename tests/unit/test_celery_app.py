@@ -51,7 +51,6 @@ class TestBeatSchedule:
         schedule = _build_beat_schedule(config)
 
         assert "run-pipeline" not in schedule
-        # NVD and maintenance always run — they are cheap and resumable.
         assert set(schedule) == {"nvd-enrichment", "maintenance", "jira-sync", "exclusion-refresh"}
 
     def test_nvd_interval_converted_to_seconds(self):

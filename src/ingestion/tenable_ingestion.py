@@ -39,7 +39,6 @@ from src.common.models import FindingStaging
 
 logger = get_logger("tenable_ingestion")
 
-# The extra_properties we request from the Tenable Inventory API
 EXTRA_PROPERTIES = ",".join([
     "finding_vpr_score",
     "finding_cvss3_base_score",
@@ -66,7 +65,6 @@ def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     if isinstance(value, (int, float)):
-        # Unix timestamp
         try:
             return datetime.utcfromtimestamp(value)
         except (ValueError, OSError):
@@ -130,15 +128,12 @@ def normalise_finding(finding: dict[str, Any], run_id: uuid.UUID) -> FindingStag
     """
     extra = finding.get("extra_properties", {}) or {}
 
-    # CVE: finding_cves is a list like ["CVE-2023-2640"], take the first
     cve_list = extra.get("finding_cves", [])
     cve_id = _first_item(cve_list)
 
-    # IP: ipv4_addresses is a list, take the first
     ip_list = extra.get("ipv4_addresses", [])
     asset_ip = _first_item(ip_list)
 
-    # Tags: combine tag_names and tag_ids into a dict for enrichment processing
     tag_names = extra.get("tag_names", [])
     tag_ids = extra.get("tag_ids", [])
     tenable_tags = None
@@ -151,32 +146,28 @@ def normalise_finding(finding: dict[str, Any], run_id: uuid.UUID) -> FindingStag
         tenable_finding_id=str(finding.get("id", "")),
         tenable_asset_id=str(finding.get("asset_id", "")),
 
-        # Finding details
         title=str(finding.get("name", "Unknown")),
         cve_id=cve_id,
         cve_ids=[str(cve) for cve in cve_list] if isinstance(cve_list, list)
                 else [str(cve_list)] if cve_list else None,
         severity=str(finding.get("severity", "Info")),
         vpr_score=_safe_float(extra.get("finding_vpr_score")),
-        acr=None,   # Not available in Inventory API
-        aes=None,   # Not available in Inventory API
-        epss_score=None,  # Not available in Inventory API
-        exploit_maturity=None,  # Not available in Inventory API
+        acr=None,
+        aes=None,
+        epss_score=None,
+        exploit_maturity=None,
         cvssv3_score=_safe_float(extra.get("finding_cvss3_base_score")),
         source=extra.get("sensor_type"),
         plugin_id=str(extra.get("finding_detection_id", "") or ""),
         solution=extra.get("finding_solution"),
 
-        # State
         tenable_state=str(finding.get("state", "ACTIVE")),
 
-        # Asset details
         asset_name=extra.get("asset_name"),
         asset_type=extra.get("asset_class"),
         asset_ip=asset_ip,
-        asset_hostname=None,  # Not directly available
+        asset_hostname=None,
 
-        # Tags and timestamps
         tenable_tags=tenable_tags,
         first_seen=_parse_datetime(extra.get("first_observed_at")),
         last_seen=_parse_datetime(extra.get("last_observed_at")),
@@ -231,7 +222,6 @@ def filter_by_asset_ids(
     if asset_id_set is None:
         return findings
     if not asset_id_set:
-        # explicitly empty set — drop everything
         logger.info("asset_id_filter_empty_set_drops_all", before=len(findings))
         return []
 

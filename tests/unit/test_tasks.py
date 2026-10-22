@@ -150,7 +150,6 @@ class TestEnrichNvdTask:
         result = tasks.enrich_nvd_task()
 
         config = tasks.get_config()
-        # nvd.max_cves_per_run defaults to 0 (no inline cap) -> task default 500
         assert calls["max_fetch"] == (config.nvd.max_cves_per_run or 500)
         assert calls["ttl_days"] == config.nvd.ttl_days
         assert result == {"cached": 7, "max_fetch": calls["max_fetch"]}

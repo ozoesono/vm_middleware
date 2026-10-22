@@ -27,9 +27,6 @@ from src.common.logging import get_logger
 logger = get_logger("tenable_client")
 
 
-# Exceptions
-
-
 class TenableAPIError(Exception):
     """Raised when the Tenable API returns an error."""
 
@@ -49,9 +46,6 @@ class TenableExportTimeoutError(TenableAPIError):
     pass
 
 
-# Data classes
-
-
 @dataclass
 class TenableFindingsPage:
     """A single page of findings from the synchronous search API."""
@@ -59,9 +53,6 @@ class TenableFindingsPage:
     total: int
     offset: int
     limit: int
-
-
-# Client
 
 
 @dataclass
@@ -115,7 +106,6 @@ class TenableClient:
             self._http_client.close()
             self._http_client = None
 
-    # Shared helpers
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         """Raise appropriate exception for error status codes."""
@@ -128,8 +118,6 @@ class TenableClient:
         if response.status_code >= 400:
             raise TenableAPIError(response.status_code, response.text[:500])
 
-    # MODE 1: Synchronous Search
-    # POST /api/v1/t1/inventory/findings/search
 
     @retry(
         stop=stop_after_attempt(3),
@@ -252,7 +240,6 @@ class TenableClient:
         logger.info("search_complete", total_findings=len(all_findings))
         return all_findings
 
-    # Server-side filtered fetch by asset_id
 
     def iter_findings_by_asset_ids(
         self,
@@ -359,8 +346,6 @@ class TenableClient:
             limit=pagination.get("limit", limit),
         )
 
-    # MODE 2: Asynchronous Export
-    # POST /api/v1/t1/inventory/export/findings  → poll → download
 
     @retry(
         stop=stop_after_attempt(3),
@@ -386,7 +371,7 @@ class TenableClient:
         response = self.http_client.post(
             self.config.export_endpoint,
             params=params,
-            json=body,  # always send a body (even {})
+            json=body,
         )
         self._raise_for_status(response)
 
@@ -444,7 +429,6 @@ class TenableClient:
             self._raise_for_status(response)
 
             chunk_data = response.json()
-            # Chunks may be a list of findings or wrapped in a data key
             if isinstance(chunk_data, list):
                 all_findings.extend(chunk_data)
             elif isinstance(chunk_data, dict):
@@ -474,25 +458,21 @@ class TenableClient:
 
         Best for: large datasets (50k+ findings).
         """
-        # Initiate the export
         export_id = self._initiate_export(filters=filters)
 
-        # Poll until complete
         status_data = self._poll_export_status(
             export_id,
             poll_interval=poll_interval,
             max_wait=max_wait,
         )
 
-        # Download all chunks; the status response carries the chunk IDs
         chunks = status_data.get("chunks", [])
         if not chunks:
-            # Some API versions use chunks_available or similar
+            # Older API responses may use chunks_available.
             chunks_available = status_data.get("chunks_available", [])
             if chunks_available:
                 chunks = chunks_available
             else:
-                # Fall back to trying chunk 0
                 logger.warning("export_no_chunks_listed", export_id=export_id)
                 chunks = [0]
 
@@ -500,7 +480,6 @@ class TenableClient:
         logger.info("export_complete", export_id=export_id, total_findings=len(all_findings))
         return all_findings
 
-    # Unified entry point
 
     def fetch_findings(
         self,
@@ -525,9 +504,6 @@ class TenableClient:
             return self.paginate_findings(filters=filters)
 
 
-# Mock client for local development / testing
-
-
 class MockTenableClient:
     """Mock client that loads findings from a JSON fixture file."""
 
@@ -548,7 +524,6 @@ class MockTenableClient:
         logger.info("mock_tenable_findings_loaded", total=len(self._findings))
         return self._findings
 
-    # Keep backward compat
     def paginate_findings(self, filters: list[dict] | None = None) -> list[dict[str, Any]]:
         return self.fetch_findings(filters=filters)
 

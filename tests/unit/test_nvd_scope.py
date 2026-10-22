@@ -22,11 +22,11 @@ def _f(session, asset_name, cve_id):
 
 
 def _seed(session):
-    _f(session, "111.dkr.ecr.eu-west-2.amazonaws.com/app:1", "CVE-2024-1")  # container only
-    _f(session, "workerenv-123-worker", "CVE-2024-2")                        # host
-    _f(session, "222.dkr.ecr.eu-west-2.amazonaws.com/app:2", "CVE-2024-3")  # container...
-    _f(session, "db-temp1", "CVE-2024-3")                                    # ...also on a host
-    _f(session, None, "CVE-2024-4")                                          # null asset -> non-container
+    _f(session, "111.dkr.ecr.eu-west-2.amazonaws.com/app:1", "CVE-2024-1")
+    _f(session, "workerenv-123-worker", "CVE-2024-2")
+    _f(session, "222.dkr.ecr.eu-west-2.amazonaws.com/app:2", "CVE-2024-3")
+    _f(session, "db-temp1", "CVE-2024-3")
+    _f(session, None, "CVE-2024-4")
 
 
 def test_all_scope_still_respects_global_exclusions(db_session):
@@ -38,8 +38,6 @@ def test_all_scope_still_respects_global_exclusions(db_session):
 def test_non_container_scope_drops_container_only_cves(db_session):
     _seed(db_session)
     got = distinct_finding_cves(db_session, exclude_container=True, container_patterns=PATTERNS)
-    # CVE-2024-1 is container-only -> dropped. CVE-2024-3 kept (also on db-temp1 host).
-    # CVE-2024-4 kept (null asset name is treated as non-container).
     assert got == {"CVE-2024-2", "CVE-2024-3", "CVE-2024-4"}
 
 

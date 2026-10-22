@@ -45,8 +45,7 @@ def _resolve_base_route(finding: Finding, config: AppConfig) -> Route:
                 finding.jira_team_id,
             )
         team = config.jira.teams.get(finding.jira_team_id)
-        # Workflow/field edits apply to an existing destination. Routing changes
-        # apply only to unbound findings; existing tickets keep their destination.
+        # Routing changes must not move existing tickets to another destination.
         if team and (team.jira.instance, team.jira.project) == (
             destination.instance,
             destination.project,

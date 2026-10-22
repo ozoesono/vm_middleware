@@ -19,8 +19,6 @@ from src.common.logging import get_logger
 
 logger = get_logger("tag_parser")
 
-# Approved categories (single-word, PascalCase). Update governance docs
-# alongside this list.
 APPROVED_CATEGORIES = {
     "Portfolio",
     "Service",
@@ -38,11 +36,11 @@ APPROVED_CATEGORIES = {
 class ParsedTag:
     """The result of parsing a Tenable tag string."""
 
-    raw: str                # Original tag string (e.g. "Environment-Prod")
-    category: str | None    # Parsed category (e.g. "Environment")
-    value: str | None       # Parsed value (e.g. "Prod")
-    is_valid: bool          # True if it matches the taxonomy
-    warning: str | None     # Reason for invalidity (None if valid)
+    raw: str
+    category: str | None
+    value: str | None
+    is_valid: bool
+    warning: str | None
 
 
 def parse_tag(raw: str) -> ParsedTag:
@@ -77,7 +75,6 @@ def parse_tag(raw: str) -> ParsedTag:
             warning="No hyphen — cannot derive category",
         )
 
-    # Split on the first hyphen
     category, _, value = raw_stripped.partition("-")
     category = category.strip()
     value = value.strip()
@@ -154,8 +151,6 @@ def parse_tags(tag_names: list[str]) -> tuple[dict[str, str], list[ParsedTag]]:
     return parsed_dict, all_parsed
 
 
-# Mapping from Tenable tag category → enrichment_mappings field name.
-# This lets the enrichment engine populate the canonical model from tags.
 CATEGORY_TO_FIELD = {
     "Portfolio": "portfolio",
     "Service": "service",

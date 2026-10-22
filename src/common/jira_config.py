@@ -53,8 +53,6 @@ class JiraAuth(StrictModel):
 class JiraInstance(StrictModel):
     deployment: Literal["cloud", "data_center"] = "cloud"
     base_url: str
-    # For scoped Cloud tokens, base_url can be the api.atlassian.com/ex/jira/{cloudId}
-    # gateway; browse links still use the site URL.
     browse_url: str | None = None
     auth: JiraAuth
     timeout_seconds: int = Field(default=30, ge=1, le=120)
@@ -88,7 +86,6 @@ class JiraInstance(StrictModel):
 class JiraTransitions(StrictModel):
     close: str = "Done"
     reopen: str = "To Do"
-    # Required transition-screen fields, such as resolution, differ by workflow.
     close_fields: dict[str, Any] = Field(default_factory=dict)
     reopen_fields: dict[str, Any] = Field(default_factory=dict)
 
@@ -108,7 +105,7 @@ class JiraDestination(StrictModel):
             "LOW": "Low",
         }
     )
-    # Cloud uses accountId; Data Center uses name. These are literal API values.
+    # Cloud uses accountId; Data Center uses name.
     assignee: dict[str, str] | None = None
     components: list[str] = Field(default_factory=list)
     custom_fields: dict[str, Any] = Field(default_factory=dict)
@@ -172,8 +169,7 @@ class JiraConfig(StrictModel):
                 raise ValueError(f"team {key!r} references unknown instance {team.jira.instance!r}")
         for i, left in enumerate(teams):
             for right in teams[i + 1 :]:
-                # AND across selectors, OR within each selector. Reject overlapping
-                # predicates rather than silently depending on file order.
+                # Reject overlapping rules so routing does not depend on file order.
                 shared = left.match.keys() & right.match.keys()
                 disjoint = any(
                     not (

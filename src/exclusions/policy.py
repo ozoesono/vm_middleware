@@ -265,7 +265,7 @@ class ExclusionPolicy(Strict):
                 continue
             conditions = rule.match.all + rule.match.any
             if raw_only and any(c.field in ENRICHMENT_FIELDS for c in conditions):
-                continue  # wait for tag/CSV enrichment before making a scoped decision
+                continue  # Scoped rules need tag/CSV enrichment.
 
             def test(condition):
                 return condition.matches(self.values(finding, condition.field))
@@ -286,7 +286,7 @@ class ExclusionPolicy(Strict):
             )
         if condition.field != "cve":
             return condition.sql(getattr(model, COLUMNS[condition.field]), dialect)
-        # Keep every CVE, including legacy records that only carry cve_id.
+        # Older records may only have cve_id.
         if dialect == "postgresql":
             elements = (
                 func.json_array_elements_text(model.cve_ids).table_valued("value").render_derived()

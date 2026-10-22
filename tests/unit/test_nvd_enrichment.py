@@ -16,9 +16,6 @@ from src.ingestion.nvd_enrichment import (
 from src.reporting import csv_reports
 
 
-# Standalone enrichment from the findings table + max_fetch bound
-
-
 class TestEnrichFromFindings:
     def _fake(self, client, cve_id, api_key):
         return {
@@ -28,7 +25,7 @@ class TestEnrichFromFindings:
         }
 
     def test_enriches_distinct_cves_from_findings_table(self, db_session):
-        for i, cve in enumerate(["CVE-2024-1", "CVE-2024-2", "CVE-2024-1"]):  # dup
+        for i, cve in enumerate(["CVE-2024-1", "CVE-2024-2", "CVE-2024-1"]):
             db_session.add(Finding(
                 id=uuid.uuid4(), tenable_finding_id=f"f{i}", title="t",
                 severity="HIGH", cve_id=cve, risk_model="custom",
@@ -41,7 +38,7 @@ class TestEnrichFromFindings:
              patch("src.ingestion.nvd_enrichment.time.sleep"):
             cached = enrich_cves_from_findings(db_session, ttl_days=30)
 
-        assert cached == 2  # distinct
+        assert cached == 2
         assert {c.cve_id for c in db_session.query(CveDetails).all()} == {"CVE-2024-1", "CVE-2024-2"}
 
     def test_max_fetch_bounds_the_work(self, db_session):
@@ -58,10 +55,9 @@ class TestEnrichFromFindings:
              patch("src.ingestion.nvd_enrichment.time.sleep"):
             cached = enrich_cves_from_findings(db_session, ttl_days=30, max_fetch=2)
 
-        assert cached == 2  # only 2 fetched despite 5 candidates
+        assert cached == 2
 
     def test_resumable_only_fetches_uncached(self, db_session):
-        # One already cached
         db_session.add(CveDetails(cve_id="CVE-2024-1", description="x", last_fetched_at=datetime.utcnow()))
         for i in [1, 2]:
             db_session.add(Finding(
@@ -76,7 +72,7 @@ class TestEnrichFromFindings:
              patch("src.ingestion.nvd_enrichment.time.sleep"):
             cached = enrich_cves_from_findings(db_session, ttl_days=30)
 
-        assert cached == 1  # only CVE-2024-2 needed fetching
+        assert cached == 1
 
 
 class TestInlineBound:
@@ -99,9 +95,6 @@ class TestInlineBound:
             cached = enrich_unique_cves_for_run(db_session, run_id, ttl_days=30, max_fetch=1)
 
         assert cached == 1
-
-
-# Parser
 
 
 class TestParseNvdResponse:
@@ -150,9 +143,6 @@ class TestParseNvdResponse:
 
     def test_empty_response(self):
         assert _parse_nvd_response({"vulnerabilities": []}, "CVE-2024-1234") is None
-
-
-# Enrichment dispatcher (mocked HTTP)
 
 
 class TestEnrichUniqueCvesForRun:
@@ -208,9 +198,6 @@ class TestEnrichUniqueCvesForRun:
         assert count == 0
 
 
-# Report uses NVD data
-
-
 def _make_finding(session, **kwargs):
     defaults = dict(
         id=uuid.uuid4(),
@@ -262,11 +249,9 @@ class TestReportEnrichedColumns:
         _make_cve(db_session)
         out = csv_reports.report_findings(db_session)
 
-        # Header should include the new columns
         assert "description" in out
         assert "solution" in out
         assert "references" in out
-        # Description should mention the CVE id, severity, and NVD text
         assert "CVE-2024-0001" in out
         assert "remote attacker can execute" in out
         assert "CVSS v3: 9.8" in out
@@ -275,7 +260,6 @@ class TestReportEnrichedColumns:
         _make_finding(db_session, solution=None)
         _make_cve(db_session)
         out = csv_reports.report_findings(db_session)
-        # Should have synthesised guidance + the vendor URLs
         assert "No vendor-specific solution available from Tenable" in out
         assert "https://vendor.com/CVE-2024-0001" in out
 
@@ -284,13 +268,11 @@ class TestReportEnrichedColumns:
         _make_cve(db_session)
         out = csv_reports.report_findings(db_session)
         assert "Upgrade to v2.5.1" in out
-        # References should still be included as a separate paragraph
         assert "References:" in out
 
     def test_works_without_cve_details_row(self, db_session):
-        _make_finding(db_session)  # no matching CveDetails
+        _make_finding(db_session)
         out = csv_reports.report_findings(db_session)
-        # Should still produce something usable — at least the title
         assert "CVE-2024-0001" in out
 
     def test_finding_without_cve_id(self, db_session):

@@ -35,7 +35,6 @@ def migrated_engine(monkeypatch):
         conn.execute(text(f'CREATE SCHEMA "{schema}"'))
     scoped_url = url.update_query_dict({"options": f"-csearch_path={schema}"})
     engine = create_engine(scoped_url)
-    # env.py reads DATABASE_URL. Override the application .env for this fixture only.
     monkeypatch.setenv("DATABASE_URL", scoped_url.render_as_string(hide_password=False))
     cfg = Config(str(Path("db/alembic.ini").resolve()))
     cfg.set_main_option("script_location", str(Path("db/migrations").resolve()))

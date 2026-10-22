@@ -39,13 +39,7 @@ def _load_env_file(path: Path) -> None:
             os.environ.setdefault(key, value)
 
 
-# Load the project-root .env (if present) before settings are read. In
-# production (e.g. Lambda) there is no .env, so this is a no-op and the real
-# environment variables (from Secrets Manager) are used instead.
 _load_env_file(Path(__file__).resolve().parents[2] / ".env")
-
-
-# Pydantic settings models
 
 
 class CustomScoringConfig(BaseModel):
@@ -63,10 +57,9 @@ class LuminScoringConfig(BaseModel):
 
 
 class ScoringConfig(BaseModel):
-    active_model: str = "custom"  # "custom" | "lumin_ces"
+    active_model: str = "custom"
     custom: CustomScoringConfig = Field(default_factory=CustomScoringConfig)
     lumin: LuminScoringConfig = Field(default_factory=LuminScoringConfig)
-    # Criticality label → numeric score (0.0 - 1.0). Drives the ACS component.
     criticality_scores: dict[str, float] = Field(
         default_factory=lambda: {
             "CRITICAL": 1.0,
@@ -75,7 +68,6 @@ class ScoringConfig(BaseModel):
             "LOW": 0.25,
         }
     )
-    # Default ACS when an asset has no Criticality tag (so scoring can still run).
     default_criticality_score: float = 0.25
 
 
@@ -117,10 +109,7 @@ class ScheduleConfig(BaseModel):
     cron: str = "0 6 * * *"
     timezone: str = "UTC"
     enabled: bool = True
-    # NVD backfill runs on an interval rather than a cron: it is resumable, so
-    # each tick just fetches the next bounded chunk of uncached CVEs.
     nvd_interval_minutes: int = 60
-    # Daily housekeeping (reap abandoned runs, prune aged STALE findings).
     maintenance_cron: str = "30 5 * * *"
     jira_interval_seconds: int = Field(default=60, ge=10)
     exclusion_interval_seconds: int = Field(default=60, ge=10)
@@ -128,12 +117,9 @@ class ScheduleConfig(BaseModel):
 
 class TenableConfig(BaseModel):
     base_url: str = "https://cloud.tenable.com"
-    # Synchronous search endpoint
     findings_endpoint: str = "/api/v1/t1/inventory/findings/search"
-    # Async export endpoint
     export_endpoint: str = "/api/v1/t1/inventory/export/findings"
-    # Which mode to use: "search" (synchronous paginated) or "export" (async bulk)
-    retrieval_mode: str = "search"  # "search" | "export"
+    retrieval_mode: str = "search"
     page_size: int = 10000
     extra_properties: str = (
         "finding_vpr_score,finding_cvss3_base_score,finding_cves,finding_solution,"
@@ -142,17 +128,8 @@ class TenableConfig(BaseModel):
         "ipv4_addresses,product"
     )
     severity_filter: list[str] | None = None
-    # Client-side tag filter — only findings whose tag_names include ANY of these
-    # are kept. None = no filter (keep everything). Filtering happens after
-    # ingestion because the Tenable Inventory API doesn't reliably accept tag filters.
     tag_filter: list[str] | None = None
-    # Drop findings whose asset_name contains any of these substrings
-    # (case-insensitive). Used to exclude ephemeral CI build images, which are
-    # intermediate artifacts rather than deployed workloads.
     exclude_asset_patterns: list[str] = Field(default_factory=list)
-    # Registry substrings that identify a container image (case-insensitive).
-    # Container images come from many registries, not just ECR — used to
-    # classify findings into container / host-CVE / cloud-misconfig workstreams.
     container_registry_patterns: list[str] = Field(
         default_factory=lambda: [
             ".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "quay.io/",
@@ -163,12 +140,8 @@ class TenableConfig(BaseModel):
     stale_threshold_days: int = 7
     request_timeout_seconds: int = 120
     max_retries: int = 3
-    export_poll_interval: int = 10  # seconds between status polls
-    export_max_wait: int = 600  # max seconds to wait for export
-    # Resilience: how many page/batch FETCHES may fail in a row (after the
-    # per-request retries are exhausted) before the run aborts. The run is
-    # marked PARTIAL_FAILURE and can be resumed; this just stops the pipeline
-    # from spinning forever against a persistently failing API.
+    export_poll_interval: int = 10
+    export_max_wait: int = 600
     max_consecutive_fetch_failures: int = 5
 
 
@@ -182,7 +155,7 @@ class NvdConfig(BaseModel):
     """
     ttl_days: int = 60
     inline_enrichment: bool = False
-    max_cves_per_run: int = 0  # bound for inline mode (0 = none inline)
+    max_cves_per_run: int = 0
 
 
 class MaintenanceConfig(BaseModel):
@@ -206,8 +179,6 @@ class AppSettings(BaseSettings):
     database_url: SecretStr = SecretStr(
         "postgresql://vm_user:vm_local_pass@localhost:5435/vm_middleware"
     )
-    # Celery broker/result backend. Inside docker-compose the worker/beat
-    # services override this to redis://redis:6379/0 via environment.
     redis_url: str = "redis://localhost:6379/0"
     tenable_access_key: SecretStr = SecretStr("")
     tenable_secret_key: SecretStr = SecretStr("")
@@ -219,9 +190,6 @@ class AppSettings(BaseSettings):
     model_config = {"env_prefix": "", "case_sensitive": False}
 
 
-# YAML loading
-
-
 def _load_yaml(config_dir: str, filename: str) -> dict[str, Any]:
     """Load a YAML config file, returning empty dict if not found."""
     path = Path(config_dir) / filename
@@ -230,9 +198,6 @@ def _load_yaml(config_dir: str, filename: str) -> dict[str, Any]:
     with open(path) as f:
         data = yaml.safe_load(f)
     return data if data else {}
-
-
-# Assembled configuration
 
 
 class AppConfig:

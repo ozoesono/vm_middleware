@@ -16,16 +16,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # plugin_id can be long composite IDs like
-    # "CLOUD_SCAN:AWSS3BUCKETPUBLICACCESSEXISTSFINDING_CRITICAL"
     op.alter_column("findings", "plugin_id", type_=sa.String(500))
     op.alter_column("findings_staging", "plugin_id", type_=sa.String(500))
 
-    # source can be longer than 50 in some cases
     op.alter_column("findings", "source", type_=sa.String(100))
     op.alter_column("findings_staging", "source", type_=sa.String(100))
 
-    # cve_id occasionally appears with extra qualifiers
     op.alter_column("findings", "cve_id", type_=sa.String(100))
     op.alter_column("findings_staging", "cve_id", type_=sa.String(100))
 

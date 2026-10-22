@@ -46,5 +46,4 @@ class TestFilterByAssetIds:
 
     def test_finding_without_asset_id_dropped(self):
         findings = [{"id": "f1", "name": "x", "severity": "LOW", "state": "ACTIVE"}]
-        # No asset_id field on the finding — dropped
         assert filter_by_asset_ids(findings, {"a1"}) == []

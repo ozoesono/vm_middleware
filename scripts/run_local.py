@@ -33,7 +33,6 @@ import os
 import sys
 from pathlib import Path
 
-# Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -90,12 +89,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load config
     os.environ.setdefault("CONFIG_DIR", args.config_dir)
     settings = AppSettings(config_dir=args.config_dir)
     config = AppConfig(settings=settings)
 
-    # Apply CLI overrides
     if args.tag:
         config.tenable.tag_filter = args.tag
         print(f">>> tag_filter override: {args.tag}")
@@ -103,7 +100,6 @@ def main():
         config.tenable.retrieval_mode = args.mode
         print(f">>> retrieval_mode override: {args.mode}")
 
-    # Warn on incompatible combos
     if args.tag and (args.mode == "export" or config.tenable.retrieval_mode == "export"):
         print()
         print("!!! WARNING: --mode export does NOT return tag data from Tenable.")
@@ -114,7 +110,6 @@ def main():
         config.tenable.severity_filter = args.severity
         print(f">>> severity_filter override: {args.severity}")
 
-    # Require Tenable credentials for a real (non-mock) run
     if not args.mock and not (
         settings.tenable_access_key.get_secret_value()
         and settings.tenable_secret_key.get_secret_value()
@@ -124,10 +119,8 @@ def main():
             "environment (or .env) for a real run. Use --mock to run against fixtures."
         )
 
-    # Initialise DB
     init_db(settings.database_url)
 
-    # Run pipeline
     mock_path = str(project_root / args.fixture) if args.mock else None
     enrichment_path = str(project_root / args.enrichment) if args.enrichment else None
 

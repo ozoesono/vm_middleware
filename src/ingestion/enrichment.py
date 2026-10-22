@@ -22,7 +22,6 @@ from src.common.tag_parser import CATEGORY_TO_FIELD, parse_tags
 
 logger = get_logger("enrichment")
 
-# Mapping from asset_criticality string to normalised score (0.25 - 1.0)
 CRITICALITY_SCORES = {
     "CRITICAL": 1.0,
     "HIGH": 0.75,
@@ -57,7 +56,6 @@ def load_enrichment_from_csv(csv_path: str, session: Session) -> int:
             criticality = row.get("asset_criticality", "").strip().upper()
             criticality_score = CRITICALITY_SCORES.get(criticality)
 
-            # Upsert: check if mapping exists
             existing = (
                 session.query(EnrichmentMapping)
                 .filter(
@@ -139,7 +137,6 @@ def apply_asset_tags_enrichment(
 
         parsed_dict, _ = parse_tags(tag_names)
 
-        # Build the enrichment payload from parsed tags
         criticality_label = parsed_dict.get("Criticality")
         if criticality_label:
             crit_score = criticality_scores.get(
@@ -160,12 +157,10 @@ def apply_asset_tags_enrichment(
             "service_owner_team": parsed_dict.get("Owner"),
         }
 
-        # Persist on the staging record under tenable_tags["_enrichment"]
         sf.tenable_tags = sf.tenable_tags or {}
         existing = sf.tenable_tags.get("_enrichment", {})
         existing.update({k: v for k, v in enrichment_payload.items() if v is not None})
         sf.tenable_tags["_enrichment"] = existing
-        # Always set criticality score (even default) so scoring works
         sf.tenable_tags["_enrichment"]["asset_criticality_score"] = crit_score
         enriched += 1
 
@@ -188,7 +183,6 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
 
     Returns the number of findings enriched.
     """
-    # Load all enrichment mappings into a lookup dict
     mappings = session.query(EnrichmentMapping).all()
     lookup_by_name: dict[str, EnrichmentMapping] = {}
     lookup_by_id: dict[str, EnrichmentMapping] = {}
@@ -199,19 +193,16 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
         elif m.identifier_type == "asset_id" and m.asset_identifier:
             lookup_by_id[m.asset_identifier] = m
 
-    # Apply to staged findings
     staged_findings = session.query(FindingStaging).filter(FindingStaging.run_id == run_id).all()
     enriched_count = 0
 
     invalid_tag_count = 0
 
     for sf in staged_findings:
-        # Start by extracting whatever we can from Tenable tags (lower priority)
         tag_enrichment = _extract_tag_enrichment(sf)
         if tag_enrichment.get("_invalid_count", 0) > 0:
             invalid_tag_count += tag_enrichment.pop("_invalid_count")
 
-        # Then try CSV/manual mapping (higher priority — overrides tag values)
         mapping = None
         if sf.tenable_asset_id:
             mapping = lookup_by_id.get(sf.tenable_asset_id)
@@ -219,7 +210,6 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
             mapping = lookup_by_name.get(sf.asset_name.lower())
 
         if mapping:
-            # CSV mapping wins — overlay it on top of tag-based enrichment
             tag_enrichment.update({
                 "portfolio": mapping.portfolio or tag_enrichment.get("portfolio"),
                 "service": mapping.service or tag_enrichment.get("service"),
@@ -231,7 +221,6 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
                 "service_owner_team": mapping.service_owner_team or tag_enrichment.get("service_owner_team"),
             })
 
-        # Persist enrichment under a reserved key in tenable_tags
         if tag_enrichment:
             sf.tenable_tags = sf.tenable_tags or {}
             sf.tenable_tags["_enrichment"] = tag_enrichment
@@ -270,13 +259,11 @@ def _extract_tag_enrichment(sf: FindingStaging) -> dict:
         if field:
             enrichment[field] = value
 
-    # If we parsed a Criticality tag, also populate the score
     if enrichment.get("asset_criticality"):
         enrichment["asset_criticality_score"] = CRITICALITY_SCORES.get(
             enrichment["asset_criticality"].upper(), 0.25
         )
 
-    # Track how many tags failed validation (caller logs the total)
     invalid_count = sum(1 for p in all_parsed if not p.is_valid)
     if invalid_count > 0:
         enrichment["_invalid_count"] = invalid_count

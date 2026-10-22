@@ -16,7 +16,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Where to resume from on the next run if this one is interrupted
     op.add_column(
         "pipeline_runs",
         sa.Column("last_offset", sa.Integer, nullable=False, server_default="0"),
@@ -29,7 +28,6 @@ def upgrade() -> None:
         "pipeline_runs",
         sa.Column("total_findings_expected", sa.Integer, nullable=True),
     )
-    # Tag filter applied during this run (for resume safety: must match)
     op.add_column(
         "pipeline_runs",
         sa.Column("tag_filter", sa.JSON, nullable=True),

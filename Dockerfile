@@ -16,5 +16,4 @@ RUN pip install --no-cache-dir .
 
 USER appuser
 
-# Overridden by docker-compose for the beat / migrate services.
 CMD ["celery", "-A", "src.celery_app:celery_app", "worker", "--loglevel=info"]

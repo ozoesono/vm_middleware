@@ -53,12 +53,9 @@ def _finding(session, **kw):
 
 
 def test_workstream_summary_report(db_session):
-    # container: 2 findings on 1 image asset (Docker Hub, not ECR)
     _finding(db_session, tenable_asset_id="img1", asset_name="docker.io/org/app:1", cve_id="CVE-1")
     _finding(db_session, tenable_asset_id="img1", asset_name="docker.io/org/app:1", cve_id="CVE-2")
-    # host CVE
     _finding(db_session, tenable_asset_id="host1", asset_name="db-temp1", cve_id="CVE-3")
-    # misconfig (no CVE): one open, one stale
     _finding(db_session, tenable_asset_id="role1", asset_name="iam-role-x", cve_id=None)
     _finding(db_session, tenable_asset_id="role2", asset_name="iam-role-y", cve_id=None, state="STALE")
 
@@ -68,7 +65,6 @@ def test_workstream_summary_report(db_session):
     rows = {r.split(",")[0]: r.split(",") for r in csv_out.strip().splitlines()[1:]}
 
     assert set(rows) == {"container_image", "host_cve", "cloud_misconfig"}
-    # columns: workstream, open_findings, stale_findings, distinct_assets
     assert rows["container_image"][1] == "2" and rows["container_image"][3] == "1"
     assert rows["host_cve"][1] == "1"
     assert rows["cloud_misconfig"][1] == "1" and rows["cloud_misconfig"][2] == "1"

@@ -54,7 +54,6 @@ class TestApplyAssetTagsEnrichment:
         sf = db_session.query(FindingStaging).filter_by(tenable_finding_id="f1").first()
         enrichment = sf.tenable_tags["_enrichment"]
         assert enrichment["asset_criticality_score"] == 0.25
-        # asset_criticality label should be absent
         assert enrichment.get("asset_criticality") is None
 
     def test_finding_without_matching_asset_skipped(self, db_session, run_id):

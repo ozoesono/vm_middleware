@@ -63,7 +63,6 @@ def main():
     patterns = config.tenable.container_registry_patterns
 
     with get_session() as session:
-        # How much is left (within scope)?
         unique = distinct_finding_cves(session, exclude_container, patterns)
         to_fetch = _filter_to_fetch(session, unique, ttl_days)
         cached_total = session.query(CveDetails).count()

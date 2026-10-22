@@ -26,7 +26,7 @@ class TestReapStaleRuns:
     def test_reaps_abandoned_running_run(self, db_session):
         now = datetime(2026, 7, 16, 12, 0, 0)
         started = now - timedelta(hours=30)
-        last_progress = now - timedelta(hours=29)  # died shortly after starting
+        last_progress = now - timedelta(hours=29)
         run = _make_run(db_session, "RUNNING", started, last_progress)
 
         reaped = reap_stale_runs(db_session, timeout_hours=6, now=now)
@@ -34,13 +34,11 @@ class TestReapStaleRuns:
         assert len(reaped) == 1
         assert reaped[0]["id"] == str(run.id)
         assert run.status == "TIMED_OUT"
-        # completed_at reflects real work (last progress), NOT the idle gap to now
         assert run.completed_at == last_progress
         assert (run.completed_at - run.started_at) == timedelta(hours=1)
 
     def test_fresh_running_run_is_not_reaped(self, db_session):
         now = datetime(2026, 7, 16, 12, 0, 0)
-        # Long-running but ALIVE: started days ago, but heartbeat is recent.
         run = _make_run(
             db_session, "RUNNING",
             started_at=now - timedelta(days=3),
@@ -54,7 +52,6 @@ class TestReapStaleRuns:
 
     def test_partial_failure_is_not_reaped(self, db_session):
         now = datetime(2026, 7, 16, 12, 0, 0)
-        # PARTIAL_FAILURE is intentionally resumable and already has completed_at.
         run = _make_run(
             db_session, "PARTIAL_FAILURE",
             started_at=now - timedelta(days=5),
@@ -76,13 +73,12 @@ class TestReapStaleRuns:
 
         reaped = reap_stale_runs(db_session, timeout_hours=6, dry_run=True, now=now)
 
-        assert len(reaped) == 1  # reported...
-        assert run.status == "RUNNING"  # ...but not mutated
+        assert len(reaped) == 1
+        assert run.status == "RUNNING"
         assert run.completed_at is None
 
     def test_last_progress_falls_back_to_started_at_when_no_heartbeat(self):
-        # Detached object (never INSERTed), so server_default/onupdate don't
-        # fire — models a pre-migration row whose updated_at is genuinely NULL.
+        # Keep the object detached so server defaults do not populate updated_at.
         from src.maintenance.retention import _last_progress
 
         run = PipelineRun(
@@ -119,7 +115,6 @@ class TestReapIntegratedWithSetup:
             db_session, cfg, start_fresh=False
         )
 
-        # Zombie was reaped, so a FRESH run started instead of resuming it.
         assert is_resume is False
         assert start_offset == 0
         assert run_id != zombie.id
@@ -157,9 +152,9 @@ class TestPruneStaleFindings:
         result = prune_stale_findings(db_session, retention_days=180, dry_run=True, now=self.NOW)
 
         assert result["total_stale"] == 2
-        assert result["eligible"] == 1  # only old_stale
+        assert result["eligible"] == 1
         assert result["deleted"] == 0
-        assert db_session.query(Finding).count() == 4  # nothing removed
+        assert db_session.query(Finding).count() == 4
 
     def test_apply_deletes_only_aged_stale(self, db_session):
         seed = self._seed(db_session)
@@ -169,7 +164,6 @@ class TestPruneStaleFindings:
         assert result["deleted"] == 1
         remaining_ids = {f.id for f in db_session.query(Finding).all()}
         assert seed["old_stale"].id not in remaining_ids
-        # recent STALE, and old REMEDIATED/OPEN are all retained
         assert seed["recent_stale"].id in remaining_ids
         assert seed["old_remediated"].id in remaining_ids
         assert seed["old_open"].id in remaining_ids

@@ -33,9 +33,6 @@ from src.common.models import Finding, JiraActionQueue, PipelineRun
 
 logger = get_logger("maintenance")
 
-# A run in this status with no terminal completion is a candidate for reaping.
-# PARTIAL_FAILURE / FAILED already carry completed_at and are intentionally
-# resumable, so they are left alone.
 REAPABLE_STATUSES = ("RUNNING",)
 TIMED_OUT_STATUS = "TIMED_OUT"
 
@@ -77,7 +74,7 @@ def reap_stale_runs(
     for run in candidates:
         progressed_at = _last_progress(run)
         if progressed_at is None or progressed_at >= cutoff:
-            continue  # never started, or still fresh — leave it
+            continue
 
         duration_hours = None
         if run.started_at:
@@ -93,8 +90,6 @@ def reap_stale_runs(
 
         if not dry_run:
             run.status = TIMED_OUT_STATUS
-            # completed_at = last progress, so duration reflects real work rather
-            # than the idle gap until the reaper noticed.
             run.completed_at = progressed_at
             errs = list(run.errors or [])
             errs.append({

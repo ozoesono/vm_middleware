@@ -10,5 +10,5 @@ class ScoringResult:
     """Result of scoring a single finding."""
 
     risk_score: float
-    risk_rating: str  # CRITICAL / HIGH / MEDIUM / LOW
-    risk_model: str   # "custom" / "lumin_ces"
+    risk_rating: str
+    risk_model: str

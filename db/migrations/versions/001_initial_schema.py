@@ -17,7 +17,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # --- findings ---
     op.create_table(
         "findings",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -76,7 +75,6 @@ def upgrade() -> None:
     op.create_index("ix_findings_last_seen", "findings", ["last_seen"])
     op.create_index("ix_findings_jira_ticket_key", "findings", ["jira_ticket_key"])
 
-    # --- findings_staging ---
     op.create_table(
         "findings_staging",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -108,7 +106,6 @@ def upgrade() -> None:
     op.create_index("ix_findings_staging_run_id", "findings_staging", ["run_id"])
     op.create_index("ix_findings_staging_tenable_finding_id", "findings_staging", ["tenable_finding_id"])
 
-    # --- enrichment_mappings ---
     op.create_table(
         "enrichment_mappings",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -128,7 +125,6 @@ def upgrade() -> None:
     op.create_index("ix_enrichment_mappings_asset_identifier", "enrichment_mappings", ["asset_identifier"])
     op.create_unique_constraint("uq_enrichment_asset", "enrichment_mappings", ["asset_identifier", "identifier_type"])
 
-    # --- enrichment_overrides ---
     op.create_table(
         "enrichment_overrides",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -140,7 +136,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_enrichment_overrides_asset_identifier", "enrichment_overrides", ["asset_identifier"])
 
-    # --- jira_action_queue ---
     op.create_table(
         "jira_action_queue",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -155,7 +150,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_jira_action_queue_run_id", "jira_action_queue", ["run_id"])
 
-    # --- jira_sync_log ---
     op.create_table(
         "jira_sync_log",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -171,7 +165,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_jira_sync_log_run_id", "jira_sync_log", ["run_id"])
 
-    # --- pipeline_runs ---
     op.create_table(
         "pipeline_runs",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -191,7 +184,6 @@ def upgrade() -> None:
         sa.Column("errors", JSON, nullable=True),
     )
 
-    # --- risk_exceptions ---
     op.create_table(
         "risk_exceptions",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),

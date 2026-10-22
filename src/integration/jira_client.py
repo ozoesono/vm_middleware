@@ -80,13 +80,12 @@ class JiraClient:
             status = response.status_code
         except httpx.TransportError as exc:
             self._observe(method, path, status, False)
-            # Do not persist exception text: transport errors can contain URLs/auth details.
+            # Transport errors can contain credentials; store only a generic message.
             raise JiraError(
                 "Jira transport failure", retryable=True, uncertain=method != "GET"
             ) from exc
         if not 200 <= status < 300:
             self._observe(method, path, status, False)
-            # Store field names, never arbitrary response text or reflected credentials.
             raise JiraError(
                 f"Jira returned HTTP {status}",
                 status=status,
@@ -174,7 +173,6 @@ class JiraClient:
 
     def find_correlated(self, project: str, label: str) -> list[dict]:
         path = "search/jql" if self.instance.deployment == "cloud" else "search"
-        # Project and label are validated/generated internally, not arbitrary JQL.
         data = self._request(
             "GET",
             path,
@@ -208,7 +206,6 @@ class JiraClient:
         # Keep assignment and issue type chosen by the team after creation.
         fields = {k: v for k, v in fields.items() if k not in ("project", "issuetype", "assignee")}
         labels = fields.pop("labels", [])
-        # Add configured labels without replacing labels maintained by the team.
         update = {"labels": [{"add": label} for label in labels if label not in existing_labels]}
         self._request(
             "PUT",

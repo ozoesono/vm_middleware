@@ -132,7 +132,6 @@ def fetch_tagged_assets_with_tags(
                     aid = extra.get("asset_id")
                 if not aid:
                     continue
-                # Capture all tag_names on this asset
                 extra = a.get("extra_properties", {}) or {}
                 tag_list = extra.get("tag_names") or []
                 if not isinstance(tag_list, list):

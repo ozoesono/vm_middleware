@@ -7,11 +7,10 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Add the project root to the path so we can import our models
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.common.db import Base
-from src.common.models import (  # noqa: F401 — ensure all models are registered
+from src.common.models import (  # noqa: F401
     Finding,
     FindingStaging,
     EnrichmentMapping,
@@ -24,11 +23,9 @@ from src.common.models import (  # noqa: F401 — ensure all models are register
 
 config = context.config
 
-# Override sqlalchemy.url from environment variable if set
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
-    # ConfigParser treats percent escapes in URL-encoded passwords/options as
-    # interpolation syntax unless doubled. SQLAlchemy receives the original URL.
+    # Escape URL percent signs for ConfigParser interpolation.
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:

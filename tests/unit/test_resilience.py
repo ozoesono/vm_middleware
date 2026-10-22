@@ -14,9 +14,6 @@ from src.common.models import FindingStaging, PipelineRun
 from src.ingestion.tenable_ingestion import ingest_findings
 
 
-# Per-record fault tolerance
-
-
 def _good_finding(fid: str) -> dict:
     return {
         "id": fid,
@@ -42,11 +39,10 @@ class TestIngestResilience:
         """A finding that raises in normalisation is skipped, not crashed on."""
         findings = [
             _good_finding("f1"),
-            {"id": None},  # will fail normalisation (no name/severity)
+            {"id": None},
             _good_finding("f3"),
         ]
 
-        # Patch normalise_finding to raise on the bad row only
         from src.ingestion import tenable_ingestion
 
         original = tenable_ingestion.normalise_finding
@@ -73,7 +69,6 @@ class TestIngestResilience:
 
         from src.ingestion import tenable_ingestion
 
-        # Force bulk_save to fail once, then succeed on subsequent calls
         call_count = {"n": 0}
         original_bulk = db_session.bulk_save_objects
 
@@ -90,12 +85,8 @@ class TestIngestResilience:
                 clear_staging=False,
             )
 
-        # Falling back to per-row should save all 5
         assert saved == 5
         assert skipped == 0
-
-
-# Auto-resume logic
 
 
 def _make_run(session, status, tag_filter=None, **kwargs):
@@ -179,9 +170,6 @@ class TestAutoResume:
         assert start_offset == 0
 
 
-# Error append helper
-
-
 class TestFetchFailureTolerance:
     """The streaming loop must tolerate a page FETCH failure (HTTP error after
     retries), not just a staging failure."""
@@ -189,7 +177,7 @@ class TestFetchFailureTolerance:
     def _config(self):
         settings = AppSettings(database_url="sqlite:///:memory:", config_dir="config")
         cfg = AppConfig(settings=settings)
-        cfg.tenable.tag_filter = None  # use the _run_streaming_all path
+        cfg.tenable.tag_filter = None
         cfg.tenable.page_size = 2
         cfg.tenable.max_consecutive_fetch_failures = 5
         return cfg
@@ -213,7 +201,6 @@ class TestFetchFailureTolerance:
                 total=6, offset=offset, limit=2,
             )
 
-        # offset 0 -> ok, offset 2 -> FETCH FAILS, offset 4 -> ok
         def fake_fetch(offset, limit=None, filters=None):
             if offset == 2:
                 raise RuntimeError("simulated HTTP fetch failure after retries")
@@ -224,12 +211,10 @@ class TestFetchFailureTolerance:
              patch.object(pipeline.TenableClient, "close"):
             completed = pipeline._run_streaming_all(db_session, cfg, run_id, start_offset=0)
 
-        # Loop ran to completion (did not crash, did not abort)
         assert completed is True
 
         run = db_session.query(PipelineRun).filter_by(id=run_id).first()
-        assert run.pages_failed == 1                 # the offset=2 page
-        # Findings from offset 0 and offset 4 were staged (4 records)
+        assert run.pages_failed == 1
         from src.common.models import FindingStaging
         staged = db_session.query(FindingStaging).filter_by(run_id=run_id).count()
         assert staged == 4
@@ -256,7 +241,7 @@ class TestFetchFailureTolerance:
              patch.object(pipeline.TenableClient, "close"):
             completed = pipeline._run_streaming_all(db_session, cfg, run_id, start_offset=0)
 
-        assert completed is False  # aborted — caller will mark PARTIAL_FAILURE
+        assert completed is False
         run = db_session.query(PipelineRun).filter_by(id=run_id).first()
         assert run.pages_failed == 3
 
@@ -278,6 +263,5 @@ class TestAppendError:
         for i in range(60):
             _append_error(run, f"err{i}", max_kept=10)
         assert len(run.errors) == 10
-        # Last 10 should be kept
         assert run.errors[-1]["msg"] == "err59"
         assert run.errors[0]["msg"] == "err50"

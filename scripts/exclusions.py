@@ -34,7 +34,7 @@ def preview(session, config, *, rule_id=None, limit=20):
         rule = next((r for r in policy.rules if r.id == rule_id), None)
         if rule is None:
             raise ValueError(f"unknown rule: {rule_id}")
-        # A disabled example can be assessed before enabling it in the live file.
+        # Preview disabled rules without activating them.
         proposed = policy.model_copy(
             update={
                 "enabled": True,

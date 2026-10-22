@@ -34,7 +34,6 @@ sys.path.insert(0, str(project_root))
 
 from src.common.config import AppConfig, AppSettings
 
-# Field names a property record might use for its identifier and its description.
 _NAME_KEYS = ("key", "name", "property", "property_name", "id", "field", "fqn")
 _DESC_KEYS = ("description", "label", "title", "display_name", "desc")
 _IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{1,80}$")
@@ -133,7 +132,6 @@ def main():
 
             display = sorted(names)
             if not display:
-                # unexpected shape — fall back to raw identifier tokens
                 display = sorted(_ident_tokens(data))
                 names = {t: "" for t in display}
 

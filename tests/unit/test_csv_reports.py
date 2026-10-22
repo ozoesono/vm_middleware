@@ -45,7 +45,6 @@ class TestFindingsReport:
         out = csv_reports.report_findings(db_session)
         rows = _parse(out)
         assert rows == []
-        # header still present
         assert "tenable_finding_id" in out
 
     def test_basic_export(self, db_session):
@@ -53,7 +52,6 @@ class TestFindingsReport:
         _make_finding(db_session, cve_id="CVE-2024-2222", risk_rating="LOW", risk_score=0.2)
         rows = _parse(csv_reports.report_findings(db_session))
         assert len(rows) == 2
-        # ordered by risk_score desc
         assert rows[0]["cve_id"] == "CVE-2024-1111"
         assert rows[1]["cve_id"] == "CVE-2024-2222"
 
@@ -88,7 +86,6 @@ class TestRiskSummary:
         _make_finding(db_session, risk_rating="CRITICAL", portfolio="A", asset_criticality="Critical")
         _make_finding(db_session, risk_rating="HIGH", portfolio="B", asset_criticality="High")
         rows = _parse(csv_reports.report_risk_summary(db_session))
-        # 2 groups
         assert len(rows) == 2
         crit = next(r for r in rows if r["risk_rating"] == "CRITICAL")
         assert crit["count"] == "2"

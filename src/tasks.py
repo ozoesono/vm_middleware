@@ -26,9 +26,6 @@ from src.pipeline import run_pipeline
 
 logger = get_logger("tasks")
 
-# Held for the whole pipeline run so Beat (or a manual trigger) never starts a
-# second concurrent run. Timeout matches the abandoned-run reaper: a worker
-# that dies releases the lock no later than when the run itself is reaped.
 PIPELINE_LOCK_KEY = "vm:pipeline:lock"
 
 

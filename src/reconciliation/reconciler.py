@@ -62,18 +62,11 @@ def reconcile(
     """
     stats = ReconciliationStats()
 
-    # Load staged findings into lookup
     staged_findings = session.query(FindingStaging).filter(FindingStaging.run_id == run_id).all()
     staged_lookup: dict[str, FindingStaging] = {sf.tenable_finding_id: sf for sf in staged_findings}
     staged_processed: set[str] = set()
 
-    # Confine stale-detection to what this run actually looked at:
-    #   - scoped_asset_ids: a tag-filtered run only pulled a subset of assets,
-    #     so it must not age out findings on assets it never touched.
-    #   - allow_stale: an empty staged set means the pull returned nothing
-    #     (failed or empty scope), not that every finding disappeared — so age
-    #     nothing out. Without these guards a 0-finding run would mark an
-    #     entire portfolio STALE.
+    # An empty or out-of-scope scan must not age out existing findings.
     scoped_asset_ids = _run_asset_scope(session, run_id)
     allow_stale = len(staged_lookup) > 0
 
@@ -87,9 +80,6 @@ def reconcile(
     if not allow_stale:
         logger.warning("stale_detection_skipped_empty_staged", run_id=str(run_id))
 
-    # Process existing findings against staged data, scoping the query to this
-    # run's assets when the run is scoped (so we neither load nor stale
-    # out-of-scope findings).
     existing_q = session.query(Finding).filter(Finding.state.in_(["OPEN", "STALE"]))
     if scoped_asset_ids is not None:
         existing_q = existing_q.filter(Finding.tenable_asset_id.in_(list(scoped_asset_ids)))
@@ -103,11 +93,8 @@ def reconcile(
             _process_existing_with_staged(finding, staged, config, run_id, session, stats)
         elif allow_stale:
             apply_policy(session, finding, config)
-            # Tracked findings are never dropped by the exclusion filter, so
-            # an actual absence can still update source state while Jira pauses.
             _process_missing_finding(finding, config, run_id, stats)
 
-    # Check REMEDIATED findings: recurrence or still fixed
     remediated_findings = session.query(Finding).filter(Finding.state == "REMEDIATED").all()
     for finding in remediated_findings:
         staged = staged_lookup.get(finding.tenable_finding_id)
@@ -117,9 +104,7 @@ def reconcile(
             state_upper = (staged.tenable_state or "").upper()
             if state_upper in ("ACTIVE", "RESURFACED", "NEW"):
                 _process_recurrence(finding, staged, config, run_id, session, stats)
-            # else: still FIXED — no action needed, just mark as processed
 
-    # Create new findings for staged items not in DB
     for tenable_id, staged in staged_lookup.items():
         if tenable_id not in staged_processed:
             _process_new_finding(staged, config, run_id, session, stats)
@@ -211,9 +196,6 @@ def _queue_jira_action(
     return True
 
 
-# Reconciliation handlers for each case
-
-
 def _observe_finding(finding, staged, config, run_id, session):
     """Keep source observations current even when middleware processing is paused."""
     for field_name in (
@@ -247,14 +229,12 @@ def _process_existing_with_staged(
     tenable_state = (staged.tenable_state or "ACTIVE").upper()
 
     if tenable_state == "FIXED":
-        # REMEDIATED: Tenable confirms it's fixed
         finding.state = "REMEDIATED"
         finding.tenable_state = tenable_state
         finding.remediated_at = _utcnow()
         finding.last_seen = staged.last_seen or finding.last_seen
         finding.last_run_id = run_id
 
-        # Calculate time to fix
         if finding.first_seen:
             delta = _utcnow() - finding.first_seen
             finding.time_to_fix_days = delta.days
@@ -267,7 +247,6 @@ def _process_existing_with_staged(
         stats.jira_actions_created += int(queued)
 
     else:
-        # STILL OPEN: update with latest data
         finding.state = "OPEN"
         finding.tenable_state = tenable_state
         finding.last_seen = staged.last_seen or finding.last_seen
@@ -280,17 +259,14 @@ def _process_existing_with_staged(
         finding.solution = staged.solution or finding.solution
         finding.last_run_id = run_id
 
-        # Apply enrichment updates
         enrichment = _extract_enrichment(staged)
         _apply_enrichment_to_finding(finding, enrichment)
 
-        # Re-score
         _score_and_sla(finding, config)
         if finding.processing_status == "PAUSED":
             stats.findings_updated += 1
             return
 
-        # Check if SLA status changed — queue UPDATE if it did
         new_sla_status = determine_sla_status(finding.sla_due_date, config.sla)
         finding.sla_status = new_sla_status
 
@@ -347,17 +323,14 @@ def _process_recurrence(
     finding.time_to_fix_days = None
     finding.last_run_id = run_id
 
-    # Update finding data
     finding.vpr_score = staged.vpr_score or finding.vpr_score
     finding.acr = staged.acr or finding.acr
     finding.aes = staged.aes or finding.aes
     finding.severity = staged.severity or finding.severity
 
-    # Apply enrichment
     enrichment = _extract_enrichment(staged)
     _apply_enrichment_to_finding(finding, enrichment)
 
-    # Re-score with new SLA from today
     _score_and_sla(finding, config)
 
     queued = _queue_jira_action(session, run_id, finding.id, "REOPEN", {
@@ -365,7 +338,6 @@ def _process_recurrence(
         "recurrence_count": finding.recurrence_count,
         "previous_remediation_date": str(finding.jira_closed_at) if finding.jira_closed_at else None,
     })
-    # Delivery records when Jira actually reopens, independently of Tenable state.
 
     stats.findings_recurred += 1
     stats.jira_actions_created += int(queued)
@@ -388,7 +360,6 @@ def _process_new_finding(
     criticality = enrichment.get("asset_criticality")
     criticality_score = enrichment.get("asset_criticality_score")
 
-    # If no enrichment, default criticality score
     if criticality_score is None and criticality:
         criticality_score = CRITICALITY_SCORES.get(criticality.upper(), 0.25)
     elif criticality_score is None:
@@ -420,7 +391,6 @@ def _process_new_finding(
         first_seen=staged.first_seen or _utcnow(),
         last_seen=staged.last_seen or _utcnow(),
         last_run_id=run_id,
-        # Enrichment
         portfolio=enrichment.get("portfolio"),
         service=enrichment.get("service"),
         environment=enrichment.get("environment"),
@@ -434,7 +404,6 @@ def _process_new_finding(
     session.add(finding)
     _observe_finding(finding, staged, config, run_id, session)
 
-    # Score and SLA (source observations remain current while paused)
     _score_and_sla(finding, config)
 
     if finding.state == "REMEDIATED":
@@ -448,7 +417,6 @@ def _process_new_finding(
         stats.findings_new += 1
         return
 
-    # Queue Jira ticket creation
     queued = _queue_jira_action(session, run_id, finding.id, "CREATE", {
         "title": finding.title,
         "cve_id": finding.cve_id,

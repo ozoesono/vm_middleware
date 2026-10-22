@@ -115,13 +115,13 @@ def test_config_release_rescores_latest_observation_without_resetting_dates(setu
     session.commit()
     observation(session, run_id, finding, vpr=1.0)
     reconcile(session, config, run_id)
-    assert finding.risk_rating == "HIGH"  # historical score, not recalculated during pause
+    assert finding.risk_rating == "HIGH"
     assert finding.vpr_score == 1.0
     if release == "remove":
         config.exclusions.rules = []
     elif release == "disable":
         config.exclusions.rules[0].enabled = False
-    config.jira.enabled = False  # the exclusion lifecycle does not depend on Jira being enabled
+    config.jira.enabled = False
     result = refresh_exclusions(session, config, now=expiry)
     assert result["resumed"] == 1
     assert finding.processing_status == "ACTIVE"

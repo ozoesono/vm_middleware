@@ -36,7 +36,6 @@ def test_two_instances_backfill_repeated_delivery_and_reports(db_engine, setup_d
     session, run_id, config, server = setup_delivery
     one = seed_finding(session, run_id)
     two = seed_finding(session, run_id, "team-api")
-    # Neither existing finding has a source queue row: onboarding must backfill both.
     result = run_sync(db_engine, config, server)
     assert result["created"] == 2
     assert len(server.creates) == 2
@@ -147,7 +146,7 @@ def test_close_reopen_and_stale_never_closes(db_engine, setup_delivery):
     finding.state = "REMEDIATED"
     finding.tenable_state = "FIXED"
     session.commit()
-    config.jira.teams["team-platform"].enabled = False  # creation gate must not block closure
+    config.jira.teams["team-platform"].enabled = False
     config.rollout.active_phase.max_tickets_per_run = 0
     run_sync(db_engine, config, server, 122)
     session.expire_all()

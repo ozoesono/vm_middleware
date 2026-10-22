@@ -211,31 +211,132 @@ includes paused findings so operators can inspect their existing ticket links.
 
 ### Exclusions and temporary pauses
 
-Exclusions control middleware processing. Tenable continues scanning, and the
-middleware continues ingesting updates for findings already stored, including
-every finding linked to a Jira ticket. A paused finding can therefore become FIXED
-in the stored Tenable data while its Jira ticket remains open. The middleware sends
-no Jira updates, transitions or new tickets for that finding during the pause.
-
-The supplied policy excludes container assets from active searches, prioritisation
-and ticket creation. Classification uses `asset_type` first, including Tenable's
-`containerImage` value. When type is missing or `unknown`, configured registry-name
-patterns provide a fallback. A host/device finding about Docker or Kubernetes is
-still a host finding. Extend `exclusions.classification.container_asset_types` as
-needed for the asset types observed in your estate.
-
-New, untracked findings that match rules using raw source fields are filtered before
-staging. The pipeline counts them in `findings_excluded` and logs counts by rule.
-Tracked findings always continue through ingestion; their source state, VPR, asset
-details and remediation guidance stay current while middleware scoring and Jira
-automation pause. Team-scoped rules run after tag/CSV enrichment and can retain new
-findings as PAUSED with an UNSCORED rating. These controls do not change Tenable's
-scan settings or add server-side filters to the Tenable search request.
+Exclusions filter the middleware's ingestion and active reports and pause its
+prioritisation and Jira automation. Tenable continues scanning. These settings do
+not change Tenable scan policies or add server-side filters to its search API; data
+can still be returned by Tenable before the middleware filters it.
 
 Define shared rules in `config/exclusions.yaml` and team-specific rules in
 `config/exclusions.d/*.yaml`. Existing `tenable.exclude_asset_patterns` are also
 evaluated by this policy, preserving those exclusions without dropping updates to
-tracked findings. Rule IDs must be unique across all files.
+tracked findings. Rule IDs must be unique across all files. Run migrations through
+`009` before using the database-backed preview, apply or report commands below.
+
+#### Exclude containers from ingestion and reporting
+
+The default `config/exclusions.yaml` enables this container rule:
+
+```yaml
+exclusions:
+  enabled: true
+  refresh_batch_size: 1000
+  classification:
+    container_asset_types:
+      - containerImage
+      - container
+      - container_image
+      - container-image
+  rules:
+    - id: container-assets
+      enabled: true
+      owner: unassigned
+      reason: Container assets are outside the middleware remediation scope.
+      match:
+        all:
+          - field: asset_kind
+            value: container
+```
+
+Edit the existing rule and set `owner` to the person or team maintaining it. This
+metadata does not require an Owner tag on the asset; this rule matches only
+`asset_kind`.
+
+Classification uses the stored `asset_type`, mapped from Tenable's `asset_class`.
+The configured type names are compared without regard to case. If your source uses
+another container type name, add that exact value to `container_asset_types`.
+When type is missing or `unknown`, registry-name patterns from
+`tenable.container_registry_patterns` provide a fallback. For example,
+`ghcr.io/org/api:1.2` matches that fallback. A known host/device type takes precedence
+over the name, so a host with a Docker vulnerability is not classified as a container
+just because its title mentions Docker.
+
+| Finding | Ingestion | Active reports and prioritisation | Jira |
+|---|---|---|---|
+| New container finding, not yet stored | Filtered before staging | Omitted | No ticket created |
+| Container finding already stored | Latest Tenable observations continue to be ingested | PAUSED and omitted | Existing ticket retained; automation paused |
+| Finding not matched by this or another exclusion | Normal ingestion | Normal processing | Normal routing and rollout rules apply |
+
+For an existing paused finding, source state, VPR and remediation guidance stay
+current. Tenable can report FIXED while the linked Jira ticket stays open; the
+middleware sends no updates or transitions until the exclusion is lifted.
+
+Validate the configuration, inspect matching stored findings and apply the policy:
+
+```bash
+.venv/bin/python scripts/exclusions.py validate
+.venv/bin/python scripts/exclusions.py preview --rule container-assets --limit 20
+.venv/bin/python scripts/exclusions.py apply --all
+```
+
+Normal finding reports exclude containers while this rule is active. Diagnostic
+exports let you inspect retained excluded records:
+
+```bash
+.venv/bin/python scripts/generate_report.py --report findings --out active-findings.csv
+.venv/bin/python scripts/generate_report.py --report findings --include-excluded --out all-stored-findings.csv
+.venv/bin/python scripts/generate_report.py --report findings --excluded-only --out excluded-findings.csv
+.venv/bin/python scripts/generate_report.py --report exclusions --out exclusion-details.csv
+```
+
+These exports contain stored records only. New findings filtered before storage
+appear in the pipeline's `findings_excluded` counter and per-rule log counts. A zero
+row count in an excluded-record export does not mean no incoming findings were
+filtered. The `jira-sync` diagnostic report also includes paused records so their
+ticket links remain visible.
+
+#### Exclude another resource type or environment
+
+Use `asset_type` to match raw type values directly. For example, create
+`config/exclusions.d/test-devices.yaml` with this disabled rule to select devices
+in development or test environments:
+
+```yaml
+rules:
+  - id: test-devices
+    enabled: false
+    owner: unassigned
+    reason: Development and test devices are outside the remediation scope.
+    match:
+      all:
+        - field: asset_type
+          value: device
+          case_sensitive: false
+        - field: environment
+          operator: in
+          value: [dev, test]
+          case_sensitive: false
+```
+
+Both conditions must match. Use actual type and environment values from your
+findings report; a missing environment does not match this rule. To exclude a type
+in every environment, omit the environment condition. To match several types, use
+`operator: in` with a list of their `asset_type` values.
+
+The environment condition needs tag/CSV enrichment, so these findings can enter
+storage before they are marked PAUSED and excluded from active reports. New paused
+records have an UNSCORED rating. Asset-type rules without enrichment conditions can
+filter new findings before staging, as the container example does.
+
+```bash
+.venv/bin/python scripts/exclusions.py validate
+.venv/bin/python scripts/exclusions.py preview --rule test-devices --limit 20
+```
+
+After reviewing the potential matches, set the rule to `enabled: true` and run
+`.venv/bin/python scripts/exclusions.py apply --all`, or let the scheduled refresh
+process it. Adding rules using the supported fields requires no Python changes.
+
+#### Temporary vulnerability exceptions
 
 Prefer a detection ID plus source/team scope, a Tenable finding ID for one specific
 finding, or a CVE with asset/team scope. Exact title matching is supported, but a
@@ -245,7 +346,8 @@ assuming it is a Nessus plugin number. CVE matching checks the full stored CVE l
 falling back to `cve_id` for older records until they are refreshed. A CVE match
 applies to the whole finding, including a finding containing several CVEs.
 
-For example, this disabled rule previews a three-month title-based exception:
+For example, save this disabled rule in `config/exclusions.d/platform.yaml` and set
+the title and expiry to the values agreed for the exception:
 
 ```yaml
 rules:
@@ -295,6 +397,8 @@ the current active policy. Counts cover stored findings. New findings filtered
 before storage are represented by pipeline counters and logs. The history command
 uses the internal `finding_id` returned by preview, not the Tenable ID.
 
+#### Resume excluded findings
+
 To pause, change the rule to `enabled: true`. To unpause early, set it to `false` or
 remove the rule. Otherwise it expires at the exact timezone-aware `expires_at`
 timestamp. Omitting expiry creates an indefinite exclusion. A finding stays paused
@@ -311,6 +415,11 @@ scan is paused or restarted, and lifting a rule does not reset the original
 detection date or grant a new SLA period. The latest score can therefore be overdue
 when the pause ends. Previously untracked findings are reconsidered on the next
 Tenable ingestion run.
+
+To restore containers specifically, set `enabled: false` on the `container-assets`
+rule and apply the policy. Keep top-level `exclusions.enabled: true` if other rules
+should remain active. Other matching rules, including legacy asset-name patterns,
+can still exclude a finding after the container rule is disabled.
 
 Pause/resume decisions are recorded in `exclusion_audit`. Normal reports hide paused
 records until they have been rescored on release, and retention preserves paused

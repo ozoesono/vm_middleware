@@ -40,7 +40,6 @@ def main():
     parser.add_argument("--out", help="Output file path (default: stdout)")
     parser.add_argument("--list", action="store_true", help="List available reports")
 
-    # Filters
     parser.add_argument("--portfolio", action="append")
     parser.add_argument("--service", action="append")
     parser.add_argument("--environment", action="append")
@@ -68,7 +67,6 @@ def main():
     if not args.report:
         parser.error("--report is required (or use --list)")
 
-    # Build filter dict from provided args
     filters = {}
     for key in (
         "portfolio", "service", "environment", "asset_criticality",
@@ -99,7 +97,7 @@ def main():
 
     if args.out:
         Path(args.out).write_text(output)
-        line_count = output.count("\n") - 1  # minus header
+        line_count = output.count("\n") - 1
         print(f"Wrote {max(line_count, 0)} rows to {args.out}")
     else:
         print(output)

@@ -34,9 +34,9 @@ logger = get_logger("nvd_enrichment")
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
-# Rate limits per NVD docs
-RATE_LIMIT_NO_KEY = (5, 30)    # 5 requests per 30s
-RATE_LIMIT_WITH_KEY = (50, 30)  # 50 requests per 30s
+# (requests, seconds)
+RATE_LIMIT_NO_KEY = (5, 30)
+RATE_LIMIT_WITH_KEY = (50, 30)
 
 
 def _utcnow() -> datetime:
@@ -53,14 +53,12 @@ def _parse_nvd_response(data: dict, cve_id: str) -> dict | None:
     if cve.get("id") != cve_id:
         return None
 
-    # English description
     description = None
     for d in cve.get("descriptions", []):
         if d.get("lang") == "en":
             description = d.get("value")
             break
 
-    # CVSS v3
     cvss_score = None
     cvss_severity = None
     metrics = cve.get("metrics", {})
@@ -72,7 +70,6 @@ def _parse_nvd_response(data: dict, cve_id: str) -> dict | None:
             cvss_severity = cd.get("baseSeverity")
             break
 
-    # CWE (weakness type)
     cwe_id = None
     cwe_name = None
     for w in cve.get("weaknesses", []):
@@ -83,7 +80,6 @@ def _parse_nvd_response(data: dict, cve_id: str) -> dict | None:
         if cwe_id:
             break
 
-    # References
     refs = []
     for ref in cve.get("references", []):
         refs.append({
@@ -92,7 +88,6 @@ def _parse_nvd_response(data: dict, cve_id: str) -> dict | None:
             "tags": ref.get("tags", []),
         })
 
-    # Published date
     published_at = None
     pub_str = cve.get("published")
     if pub_str:
@@ -257,7 +252,7 @@ def distinct_finding_cves(
     non-container) CVEs remain. A CVE that appears on at least one
     non-container asset is kept even if it also appears on container images.
     """
-    from src.common.models import Finding  # local import to avoid cycles
+    from src.common.models import Finding
 
     q = session.query(Finding.cve_id).filter(Finding.cve_id.isnot(None))
     from src.common.config import AppConfig

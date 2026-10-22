@@ -99,8 +99,6 @@ def _setup_or_resume_run(
     Returns:
         (run_id, start_offset, is_resume)
     """
-    # Reap abandoned RUNNING runs first, so a corpse can neither hijack
-    # auto-resume below nor keep reporting an ever-growing duration.
     reaped = reap_stale_runs(session, config.maintenance.run_timeout_hours)
     if reaped:
         logger.warning("reaped_abandoned_runs", count=len(reaped), run_ids=[r["id"] for r in reaped])
@@ -140,7 +138,6 @@ def _setup_or_resume_run(
                     current_tags=cur_tags,
                 )
 
-    # Fresh run
     run_id = uuid.uuid4()
     pipeline_run = PipelineRun(
         id=run_id,
@@ -200,14 +197,12 @@ def run_pipeline(
         )
 
         try:
-            # Enrichment sync (skip on resume — already done)
             if not is_resume and enrichment_csv_path:
                 logger.info("step_1_enrichment_sync")
                 count = load_enrichment_from_csv(enrichment_csv_path, session)
                 logger.info("enrichment_loaded", count=count)
                 session.commit()
 
-            # Stream Tenable findings (with checkpoint per page)
             logger.info("step_2_tenable_ingestion_streaming")
 
             if mock_fixture_path:
@@ -216,10 +211,7 @@ def run_pipeline(
             else:
                 ingestion_complete = _run_streaming(session, config, run_id, start_offset)
 
-            # If ingestion aborted early (persistent fetch failures), DO NOT
-            # reconcile — a partial dataset would wrongly mark unfetched findings
-            # as STALE. Leave the run PARTIAL_FAILURE + staging intact so the next
-            # run resumes ingestion from the checkpoint.
+            # Partial ingestion must not mark unfetched findings STALE.
             if not ingestion_complete:
                 run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
                 run.status = "PARTIAL_FAILURE"
@@ -230,7 +222,6 @@ def run_pipeline(
                 _print_summary(run)
                 return run
 
-            # Apply tag-based enrichment from the asset_tags_map (if any)
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             asset_tags_map = None
             if run.asset_ids_for_run and isinstance(run.asset_ids_for_run, dict):
@@ -246,17 +237,13 @@ def run_pipeline(
                 )
                 session.commit()
 
-            # CSV-based enrichment (manual overrides on top of tag enrichment)
             logger.info("step_3b_apply_csv_enrichment")
             apply_enrichment(session, run_id)
             session.commit()
 
-            # Reconciliation runs before NVD so findings are scored and
-            # reportable without waiting on the slow CVE description fetch.
             logger.info("step_4_scoring_reconciliation")
             recon_stats = reconcile(session, config, run_id)
 
-            # Update final stats
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.findings_new = recon_stats.findings_new
             run.findings_updated = recon_stats.findings_updated
@@ -265,7 +252,6 @@ def run_pipeline(
             run.findings_stale = recon_stats.findings_stale
             session.commit()
 
-            # Jira delivery runs independently once this run is marked complete.
             actions = (
                 session.query(JiraActionQueue)
                 .filter(JiraActionQueue.run_id == run_id)
@@ -273,10 +259,6 @@ def run_pipeline(
             )
             logger.info("step_5_jira_queue", actions=actions)
 
-            # Inline NVD enrichment is off by default and bounded. Findings are
-            # already scored and reportable here; NVD only fills the report
-            # Description column. Run scripts/enrich_nvd.py to backfill without
-            # blocking.
             if config.nvd.inline_enrichment and config.nvd.max_cves_per_run > 0:
                 logger.info("step_6_inline_nvd_enrichment", max=config.nvd.max_cves_per_run)
                 enrich_unique_cves_for_run(
@@ -291,13 +273,9 @@ def run_pipeline(
                     hint="run scripts/enrich_nvd.py to backfill CVE descriptions",
                 )
 
-            # Clean up staging for this run
             session.query(FindingStaging).filter(FindingStaging.run_id == run_id).delete()
 
-            # If some pages were skipped (fetch/stage failures) but ingestion
-            # ran to completion, mark COMPLETED_WITH_ERRORS rather than SUCCESS.
-            # This is NOT in the auto-resume set: the missed findings will be
-            # re-pulled on the next scheduled run (pull-and-reconcile).
+            # Skipped pages are fetched again by the next full run.
             run.status = "COMPLETED_WITH_ERRORS" if (run.pages_failed or 0) > 0 else "SUCCESS"
             run.completed_at = _utcnow()
             session.commit()
@@ -306,7 +284,7 @@ def run_pipeline(
             logger.error("pipeline_error", error=str(e), run_id=str(run_id))
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             if run is not None:
-                run.status = "PARTIAL_FAILURE"  # so it can be resumed
+                run.status = "PARTIAL_FAILURE"
                 run.completed_at = _utcnow()
                 _append_error(run, f"unhandled pipeline error: {str(e)[:200]}")
                 session.commit()
@@ -343,15 +321,12 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
     """
     run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
 
-    # Either resume an existing asset list or fetch fresh
     if run.asset_ids_for_run:
-        # asset_ids_for_run on resume holds {"ids": [...], "tags": {asset_id: [tag_names]}}
         stored = run.asset_ids_for_run
         if isinstance(stored, dict):
             asset_ids = stored.get("ids", [])
             asset_tags_map = stored.get("tags", {})
         else:
-            # Older runs stored just a list — degrade gracefully
             asset_ids = stored
             asset_tags_map = {}
         start_batch = run.last_batch_idx
@@ -370,7 +345,6 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
             tag_names=config.tenable.tag_filter,
         )
         asset_ids = sorted(asset_tags_map.keys())  # deterministic ordering for resume
-        # Save both the ordered ID list AND the per-asset tag map for resume
         run.asset_ids_for_run = {"ids": asset_ids, "tags": asset_tags_map}
         session.commit()
         start_batch = 0
@@ -378,7 +352,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
 
     if not asset_ids:
         logger.warning("no_tagged_assets_found_nothing_to_fetch")
-        return True  # nothing to fetch is a complete (empty) ingestion
+        return True
 
     batch_size = 500
     total_batches = (len(asset_ids) + batch_size - 1) // batch_size
@@ -397,8 +371,6 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
     try:
         consec_failures = 0
 
-        # Drive batch iteration MANUALLY so a failed batch FETCH is caught,
-        # logged, the checkpoint advanced, and the next batch attempted.
         for batch_idx in range(start_batch, total_batches):
             batch = asset_ids[batch_idx * batch_size:(batch_idx + 1) * batch_size]
 
@@ -407,7 +379,6 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
             batch_skipped = 0
             batch_failed = False
 
-            # Paginate within this batch (a batch can have >page_size findings)
             offset = 0
             batch_total: int | None = None
             while True:
@@ -424,7 +395,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
                         offset=offset,
                         consecutive_failures=consec_failures,
                     )
-                    break  # skip the rest of this batch; move to the next
+                    break
 
                 if batch_total is None:
                     batch_total = page.total
@@ -442,7 +413,6 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
                 if offset >= (batch_total or 0) or len(page.findings) == 0:
                     break
 
-            # Advance checkpoint (always, even if the batch failed)
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
             run.last_batch_idx = batch_idx + 1
             run.pages_completed += 1
@@ -468,7 +438,7 @@ def _run_streaming_by_tagged_assets(session, config, run_id: uuid.UUID) -> bool:
 
             if consec_failures >= max_consec:
                 logger.error("aborting_after_consecutive_fetch_failures", count=consec_failures)
-                return False  # aborted early — caller keeps run resumable
+                return False
 
         logger.info("batched_fetch_done", run_id=str(run_id))
         return True
@@ -500,7 +470,6 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
         consec_failures = 0
 
         while True:
-            # Fetch (resilient)
             try:
                 page = client.fetch_page(offset=offset, limit=page_size)
                 consec_failures = 0
@@ -514,13 +483,13 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 )
                 run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
                 run.pages_failed = (run.pages_failed or 0) + 1
-                run.last_offset = offset + page_size  # advance past the bad page
+                run.last_offset = offset + page_size
                 _append_error(run, f"fetch failed at offset {offset}: {str(e)[:120]}")
                 session.commit()
 
                 if consec_failures >= max_consec:
                     logger.error("aborting_after_consecutive_fetch_failures", count=consec_failures)
-                    return False  # aborted early — caller keeps run resumable
+                    return False
 
                 offset += page_size
                 if total is not None and offset >= total:
@@ -533,7 +502,6 @@ def _run_streaming_all(session, config, run_id: uuid.UUID, start_offset: int) ->
                 run.total_findings_expected = total
                 session.commit()
 
-            # Stage (resilient)
             saved, skipped, page_failed = _stage_page(session, run_id, page.findings, config=config)
 
             run = session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
