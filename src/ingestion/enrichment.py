@@ -157,11 +157,12 @@ def apply_asset_tags_enrichment(
             "service_owner_team": parsed_dict.get("Owner"),
         }
 
-        sf.tenable_tags = sf.tenable_tags or {}
-        existing = sf.tenable_tags.get("_enrichment", {})
+        # Replace the JSON value so SQLAlchemy persists changes to existing tags.
+        tags = dict(sf.tenable_tags or {})
+        existing = dict(tags.get("_enrichment", {}))
         existing.update({k: v for k, v in enrichment_payload.items() if v is not None})
-        sf.tenable_tags["_enrichment"] = existing
-        sf.tenable_tags["_enrichment"]["asset_criticality_score"] = crit_score
+        tags["_enrichment"] = existing
+        sf.tenable_tags = tags
         enriched += 1
 
     session.flush()
@@ -199,9 +200,11 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
     invalid_tag_count = 0
 
     for sf in staged_findings:
+        tags = dict(sf.tenable_tags or {})
         tag_enrichment = _extract_tag_enrichment(sf)
-        if tag_enrichment.get("_invalid_count", 0) > 0:
-            invalid_tag_count += tag_enrichment.pop("_invalid_count")
+        invalid_tag_count += tag_enrichment.pop("_invalid_count", 0)
+        # Keep the asset-search enrichment when finding tags are absent or partial.
+        tag_enrichment.update(tags.get("_enrichment", {}))
 
         mapping = None
         if sf.tenable_asset_id:
@@ -222,8 +225,8 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
             })
 
         if tag_enrichment:
-            sf.tenable_tags = sf.tenable_tags or {}
-            sf.tenable_tags["_enrichment"] = tag_enrichment
+            tags["_enrichment"] = tag_enrichment
+            sf.tenable_tags = tags
             enriched_count += 1
 
     session.flush()
