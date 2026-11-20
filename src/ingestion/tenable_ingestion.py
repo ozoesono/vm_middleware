@@ -14,6 +14,8 @@ Field mapping from Tenable One Inventory API to our data model:
       finding_cvss3_base_score → cvssv3_score
       finding_cves            →  cve_id (list → first item)
       finding_solution        →  solution
+      finding_description     →  source_description
+      detection_output        →  detection_output
       finding_severity        →  (use top-level severity instead)
       finding_detection_id    →  plugin_id
       asset_name              →  asset_name
@@ -44,6 +46,8 @@ EXTRA_PROPERTIES = ",".join([
     "finding_cvss3_base_score",
     "finding_cves",
     "finding_solution",
+    "finding_description",
+    "detection_output",
     "finding_detection_id",
     "asset_name",
     "asset_class",
@@ -104,6 +108,11 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _optional_text(value: Any) -> str | None:
+    """Keep source text intact; absent, blank or structured values are not prose."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _get_extra(finding: dict, key: str) -> Any:
     """Get a value from finding's extra_properties or top-level."""
     extra = finding.get("extra_properties", {})
@@ -159,6 +168,8 @@ def normalise_finding(finding: dict[str, Any], run_id: uuid.UUID) -> FindingStag
         cvssv3_score=_safe_float(extra.get("finding_cvss3_base_score")),
         source=extra.get("sensor_type"),
         plugin_id=str(extra.get("finding_detection_id", "") or ""),
+        source_description=_optional_text(_get_extra(finding, "finding_description")),
+        detection_output=_optional_text(_get_extra(finding, "detection_output")),
         solution=extra.get("finding_solution"),
 
         tenable_state=str(finding.get("state", "ACTIVE")),

@@ -92,6 +92,7 @@ FINDINGS_COLUMNS = [
     "title",
     "severity",
     "description",
+    "detection_output",
     "solution",
     "references",
     "cwe",
@@ -167,8 +168,7 @@ def _format_solution(finding: Finding, cve: CveDetails | None) -> str:
 
 
 def _format_description(finding: Finding, cve: CveDetails | None) -> str:
-    """Build the Description column. Combines finding identity, CVE summary,
-    and asset context — all the info a resolver needs to understand the issue.
+    """Combine source description (or NVD fallback) with finding and asset context.
     """
     parts = []
 
@@ -177,7 +177,9 @@ def _format_description(finding: Finding, cve: CveDetails | None) -> str:
         header += f"  •  Severity: {finding.severity}"
     parts.append(header)
 
-    if cve and cve.description:
+    if finding.source_description and finding.source_description.strip():
+        parts.append(finding.source_description.strip())
+    elif cve and cve.description:
         parts.append(cve.description.strip())
     elif finding.title and finding.title != finding.cve_id:
         parts.append(finding.title)
@@ -206,9 +208,8 @@ def _format_description(finding: Finding, cve: CveDetails | None) -> str:
 def report_findings(session: Session, filters: dict | None = None) -> str:
     """Full findings export with rich description + solution columns.
 
-    LEFT JOINs cve_details (NVD-enriched data) so the report shows the
-    proper CVE description and remediation references even when Tenable
-    omits them (which it does for Cloud Security findings).
+    Source descriptions and detection evidence come from Inventory. A LEFT JOIN
+    to cve_details provides NVD fallback descriptions and remediation references.
     """
     q = _apply_filters(
         session.query(Finding, CveDetails)

@@ -162,18 +162,22 @@ def _sync_existing(session, finding, client, route, fields, action, now):
     finding.jira_ticket_status = issue["fields"]["status"]["name"]
 
 
-def sync_jira(engine, config: AppConfig, *, client_factory=JiraClient, now=None) -> dict:
+def sync_jira(engine, config: AppConfig, *, client_factory=JiraClient, now=None,
+              finding_id=None) -> dict:
     if not config.jira.enabled:
         return {"skipped": True, "reason": "Jira delivery is disabled"}
     validate_rollout(config)
     with delivery_session(engine) as session:
         if session is None:
             return {"skipped": True, "reason": "another Jira delivery batch is active"}
-        return _sync_batch(session, config, client_factory, (lambda: now) if now else utcnow)
+        return _sync_batch(session, config, client_factory, (lambda: now) if now else utcnow,
+                           target_finding_id=finding_id)
 
 
-def _sync_batch(session, config, client_factory, clock):
+def _sync_batch(session, config, client_factory, clock, *, target_finding_id=None):
     now = clock()
+    if target_finding_id is not None and session.get(Finding, target_finding_id) is None:
+        raise ValueError(f"unknown middleware finding ID: {target_finding_id}")
     # One common budget epoch prevents historical queue rows from bypassing caps.
     run = (
         session.query(PipelineRun)
@@ -203,6 +207,7 @@ def _sync_batch(session, config, client_factory, clock):
     candidates = (
         session.query(Finding.id)
         .filter(
+            Finding.id == target_finding_id if target_finding_id is not None else True,
             or_(Finding.last_run_id.is_(None), completed_source),
             or_(
                 Finding.state == "OPEN",

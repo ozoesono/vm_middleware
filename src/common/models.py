@@ -44,6 +44,8 @@ class Finding(Base):
     cvssv3_score = Column(Float, nullable=True)
     source = Column(String(100), nullable=True)
     plugin_id = Column(String(500), nullable=True)  # Tenable may supply a composite detection ID.
+    source_description = Column(Text, nullable=True)
+    detection_output = Column(Text, nullable=True)
     solution = Column(Text, nullable=True)
 
     asset_name = Column(String(500), nullable=True)
@@ -146,6 +148,8 @@ class FindingStaging(Base):
     cvssv3_score = Column(Float, nullable=True)
     source = Column(String(100), nullable=True)
     plugin_id = Column(String(500), nullable=True)
+    source_description = Column(Text, nullable=True)
+    detection_output = Column(Text, nullable=True)
     solution = Column(Text, nullable=True)
     tenable_state = Column(String(20), nullable=True)
 

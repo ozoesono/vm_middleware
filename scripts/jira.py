@@ -29,12 +29,16 @@ def main():
         "preview", help="read findings and show proposed routing/payloads"
     )
     preview.add_argument("--team")
+    preview.add_argument("--source", help="exact scanner source, for example WAS")
+    preview.add_argument("--finding-id", type=uuid.UUID, help="one middleware finding UUID")
     preview.add_argument("--limit", type=int, default=100)
     check = commands.add_parser(
         "check", help="read Jira metadata and validate one team's create fields"
     )
     check.add_argument("--team", required=True)
-    commands.add_parser("sync", help="deliver one batch; requires jira.enabled: true")
+    sync = commands.add_parser("sync", help="deliver one batch; requires jira.enabled: true")
+    sync.add_argument("--finding-id", type=uuid.UUID,
+                      help="deliver only this middleware finding; normal eligibility and retry rules apply")
     retry = commands.add_parser("retry", help="retry a failed finding")
     retry.add_argument("--finding-id", type=uuid.UUID, required=True)
     retry.add_argument(
@@ -92,9 +96,10 @@ def main():
                 if not 1 <= args.limit <= 10000:
                     raise ValueError("limit must be between 1 and 10000")
                 with get_session() as session:
-                    result = preview_routes(session, config, team_id=args.team, limit=args.limit)
+                    result = preview_routes(session, config, team_id=args.team, limit=args.limit,
+                                            finding_id=args.finding_id, source=args.source)
             elif args.command == "sync":
-                result = sync_jira(get_engine(), config)
+                result = sync_jira(get_engine(), config, finding_id=args.finding_id)
             elif args.command == "retry":
                 retry_finding(
                     get_engine(), args.finding_id, clear_uncertain=args.clear_uncertain_create

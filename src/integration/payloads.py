@@ -7,6 +7,12 @@ from src.common.jira_config import JiraDestination, JiraInstance
 from src.common.models import CveDetails, Finding
 from src.reporting.csv_reports import _format_description, _format_solution
 
+def _evidence(finding: Finding) -> str:
+    output = (finding.detection_output or "").strip()
+    if not output:
+        return ""
+    return f"Detection evidence (Tenable):\n{output}"
+
 
 def correlation_label(finding: Finding) -> str:
     return f"vmf-{finding.id.hex}"
@@ -24,6 +30,7 @@ def issue_fields(
             [
                 _format_description(finding, cve),
                 _format_solution(finding, cve),
+                _evidence(finding),
                 f"Finding ID: {finding.tenable_finding_id}\n"
                 f"Owner team: {finding.service_owner_team or 'Unassigned'}\n"
                 f"Portfolio: {finding.portfolio or 'Unknown'}\n"

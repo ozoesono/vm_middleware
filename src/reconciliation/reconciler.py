@@ -200,6 +200,7 @@ def _observe_finding(finding, staged, config, run_id, session):
     """Keep source observations current even when middleware processing is paused."""
     for field_name in (
         "title", "cve_id", "cve_ids", "severity", "source", "plugin_id", "solution",
+        "source_description", "detection_output",
         "asset_name", "asset_type", "tenable_asset_id", "asset_ip", "asset_hostname",
         "vpr_score", "acr", "aes",
         "epss_score", "exploit_maturity", "cvssv3_score", "tenable_state",
@@ -225,7 +226,10 @@ def _process_existing_with_staged(
     """Process a finding that exists in both DB and current staging."""
     old_sla_status = finding.sla_status
     old_risk_rating = finding.risk_rating
+    detail_fields = ("source_description", "detection_output", "solution")
+    old_details = tuple(getattr(finding, name) for name in detail_fields)
     _observe_finding(finding, staged, config, run_id, session)
+    details_changed = old_details != tuple(getattr(finding, name) for name in detail_fields)
     tenable_state = (staged.tenable_state or "ACTIVE").upper()
 
     if tenable_state == "FIXED":
@@ -272,10 +276,12 @@ def _process_existing_with_staged(
 
         if finding.jira_ticket_key and (
             old_sla_status != new_sla_status or old_risk_rating != finding.risk_rating
+            or details_changed
         ):
             queued = _queue_jira_action(session, run_id, finding.id, "UPDATE", {
                 "sla_status_change": f"{old_sla_status} -> {new_sla_status}",
                 "risk_score": finding.risk_score,
+                "details_changed": details_changed,
             })
             stats.jira_actions_created += int(queued)
 

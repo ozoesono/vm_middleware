@@ -123,6 +123,7 @@ class TenableConfig(BaseModel):
     page_size: int = 10000
     extra_properties: str = (
         "finding_vpr_score,finding_cvss3_base_score,finding_cves,finding_solution,"
+        "finding_description,detection_output,"
         "finding_detection_id,asset_name,asset_class,sensor_type,"
         "first_observed_at,last_observed_at,last_updated,tag_names,tag_ids,"
         "ipv4_addresses,product"
@@ -177,7 +178,7 @@ class AppSettings(BaseSettings):
     """Top-level application settings, sourced from env vars."""
 
     database_url: SecretStr = SecretStr(
-        "postgresql://vm_user:vm_local_pass@localhost:5435/vm_middleware"
+        "postgresql+psycopg2://vm_user:vm_local_pass@localhost:5435/vm_middleware"
     )
     redis_url: str = "redis://localhost:6379/0"
     tenable_access_key: SecretStr = SecretStr("")

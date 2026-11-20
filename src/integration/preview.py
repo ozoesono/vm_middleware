@@ -9,10 +9,12 @@ from src.integration.payloads import issue_fields
 from src.integration.routing import resolve_route, validate_rollout
 
 
-def preview_routes(session, config, *, team_id=None, limit=100):
+def preview_routes(session, config, *, team_id=None, limit=100, finding_id=None, source=None):
     validate_rollout(config)
     if team_id and team_id not in config.jira.teams:
         raise ValueError(f"unknown team: {team_id}")
+    if finding_id is not None and session.get(Finding, finding_id) is None:
+        raise ValueError(f"unknown middleware finding ID: {finding_id}")
     run = (
         session.query(PipelineRun)
         .filter(PipelineRun.status.in_(["SUCCESS", "COMPLETED_WITH_ERRORS"]))
@@ -28,6 +30,10 @@ def preview_routes(session, config, *, team_id=None, limit=100):
             }
         )
     query = session.query(Finding)
+    if finding_id is not None:
+        query = query.filter(Finding.id == finding_id)
+    if source is not None:
+        query = query.filter(Finding.source == source)
     if team_id:
         team = config.jira.teams[team_id]
         selectors = [
@@ -69,6 +75,9 @@ def preview_routes(session, config, *, team_id=None, limit=100):
             {
                 "finding_id": str(finding.id),
                 "tenable_finding_id": finding.tenable_finding_id,
+                "title": finding.title,
+                "source": finding.source,
+                "risk_rating": finding.risk_rating,
                 "team_id": route.team_id,
                 "route_status": route.status,
                 "instance": route.destination.instance if route.destination else None,
