@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.common.logging import get_logger
+from src.common.ownership import unique_names
 
 logger = get_logger("tag_parser")
 
@@ -106,11 +107,11 @@ def parse_tag(raw: str) -> ParsedTag:
     )
 
 
-def parse_tags(tag_names: list[str]) -> tuple[dict[str, str], list[ParsedTag]]:
+def parse_tags(tag_names: list[str]) -> tuple[dict[str, str | list[str]], list[ParsedTag]]:
     """Parse a list of tag strings into a category→value dict and warnings.
 
-    If multiple tags share the same category (which shouldn't happen in
-    a well-governed instance), the LAST one wins and a warning is logged.
+    Service values are retained as an ordered list. Other categories keep the
+    last value and log a warning on collisions.
 
     Returns:
         (parsed_dict, all_parsed_tags)
@@ -121,7 +122,7 @@ def parse_tags(tag_names: list[str]) -> tuple[dict[str, str], list[ParsedTag]]:
         all_parsed_tags: List of ParsedTag objects including invalid ones,
                          so callers can log/report all warnings.
     """
-    parsed_dict: dict[str, str] = {}
+    parsed_dict: dict[str, str | list[str]] = {}
     all_parsed: list[ParsedTag] = []
 
     if not tag_names:
@@ -132,6 +133,9 @@ def parse_tags(tag_names: list[str]) -> tuple[dict[str, str], list[ParsedTag]]:
         all_parsed.append(parsed)
 
         if parsed.is_valid:
+            if parsed.category == "Service":
+                parsed_dict.setdefault(parsed.category, []).append(parsed.value)
+                continue
             if parsed.category in parsed_dict:
                 logger.warning(
                     "tag_category_collision",
@@ -148,6 +152,8 @@ def parse_tags(tag_names: list[str]) -> tuple[dict[str, str], list[ParsedTag]]:
                 warning=parsed.warning,
             )
 
+    if "Service" in parsed_dict:
+        parsed_dict["Service"] = unique_names(parsed_dict["Service"])
     return parsed_dict, all_parsed
 
 

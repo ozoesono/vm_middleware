@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from collections import defaultdict
 from typing import Any
 
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 from src.common.config import AppConfig
 from src.common.logging import get_logger
 from src.common.models import CveDetails, Finding
+from src.common.ownership import membership_sql, services_for
 from src.exclusions.policy import DEFAULT_REGISTRIES, Classification
 
 logger = get_logger("csv_reports")
@@ -67,6 +69,11 @@ def _apply_filters(query, filters: dict[str, Any] | None):
         col = column_map.get(key)
         if col is None or value is None:
             continue
+        if key == "service":
+            wanted = list(value) if isinstance(value, (list, tuple, set)) else [value]
+            query = query.filter(membership_sql(Finding, "services", "service",
+                                                lambda item: item.in_(wanted), dialect))
+            continue
         if isinstance(value, (list, tuple, set)):
             query = query.filter(col.in_(list(value)))
         else:
@@ -80,8 +87,16 @@ def _write_csv(rows: list[dict], fieldnames: list[str]) -> str:
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for r in rows:
-        writer.writerow(r)
+        writer.writerow({key: json.dumps(value) if key == "services" else value
+                         for key, value in r.items()})
     return buf.getvalue()
+
+
+def _finding_columns(finding, columns):
+    row = {column: getattr(finding, column, None) for column in columns}
+    if "services" in row:
+        row["services"] = services_for(finding)
+    return row
 
 
 FINDINGS_COLUMNS = [
@@ -106,6 +121,7 @@ FINDINGS_COLUMNS = [
     "asset_ip",
     "portfolio",
     "service",
+    "services",
     "environment",
     "data_sensitivity",
     "asset_criticality",
@@ -224,6 +240,7 @@ def report_findings(session: Session, filters: dict | None = None) -> str:
             "description", "solution", "references", "cwe"
         )}
         row["description"] = _format_description(finding, cve)
+        row["services"] = services_for(finding)
         row["solution"] = _format_solution(finding, cve)
         row["cwe"] = cve.cwe_id if cve else None
         if cve and cve.references:
@@ -273,7 +290,7 @@ def report_risk_summary(session: Session, filters: dict | None = None) -> str:
 
 SLA_COLUMNS = [
     "tenable_finding_id", "cve_id", "title", "risk_rating", "risk_score",
-    "asset_name", "portfolio", "service", "environment", "asset_criticality",
+    "asset_name", "portfolio", "service", "services", "environment", "asset_criticality",
     "service_owner_team", "sla_days", "sla_due_date", "sla_status",
     "first_seen", "jira_ticket_key",
 ]
@@ -284,7 +301,7 @@ def report_sla_breaches(session: Session, filters: dict | None = None) -> str:
     f = dict(filters or {})
     f["sla_status"] = "BREACHED"
     q = _apply_filters(session.query(Finding), f).order_by(Finding.sla_due_date)
-    rows = [{c: getattr(x, c, None) for c in SLA_COLUMNS} for x in q.all()]
+    rows = [_finding_columns(x, SLA_COLUMNS) for x in q.all()]
     logger.info("report_sla_breaches_generated", rows=len(rows))
     return _write_csv(rows, SLA_COLUMNS)
 
@@ -294,14 +311,14 @@ def report_sla_approaching(session: Session, filters: dict | None = None) -> str
     f = dict(filters or {})
     f["sla_status"] = "APPROACHING"
     q = _apply_filters(session.query(Finding), f).order_by(Finding.sla_due_date)
-    rows = [{c: getattr(x, c, None) for c in SLA_COLUMNS} for x in q.all()]
+    rows = [_finding_columns(x, SLA_COLUMNS) for x in q.all()]
     logger.info("report_sla_approaching_generated", rows=len(rows))
     return _write_csv(rows, SLA_COLUMNS)
 
 
 RECURRENCE_COLUMNS = [
     "tenable_finding_id", "cve_id", "title", "risk_rating", "asset_name",
-    "portfolio", "service", "recurrence_count", "remediated_at",
+    "portfolio", "service", "services", "recurrence_count", "remediated_at",
     "last_seen", "jira_ticket_key",
 ]
 
@@ -312,7 +329,7 @@ def report_recurrence(session: Session, filters: dict | None = None) -> str:
         session.query(Finding).filter(Finding.is_recurrence.is_(True)),
         filters,
     ).order_by(Finding.recurrence_count.desc())
-    rows = [{c: getattr(x, c, None) for c in RECURRENCE_COLUMNS} for x in q.all()]
+    rows = [_finding_columns(x, RECURRENCE_COLUMNS) for x in q.all()]
     logger.info("report_recurrence_generated", rows=len(rows))
     return _write_csv(rows, RECURRENCE_COLUMNS)
 
@@ -445,14 +462,14 @@ def report_workstream_summary(
 def report_jira_sync(session: Session, filters: dict | None = None) -> str:
     """Delivery state per finding, including findings that have no Jira ticket."""
     filters = {"include_excluded": True, **(filters or {})}
-    columns = ["id", "tenable_finding_id", "service_owner_team", "jira_team_id",
+    columns = ["id", "tenable_finding_id", "service", "services", "service_owner_team", "jira_team_id",
                "risk_rating", "state", "sla_status", "jira_instance_id", "jira_ticket_key",
                "jira_ticket_url", "jira_ticket_status", "jira_sync_status", "jira_sync_error",
                "jira_attempts", "jira_last_synced_at", "jira_next_sync_at",
                "processing_status", "exclusion_rule_ids", "exclusion_reason", "exclusion_until",
                "last_observed_at"]
     findings = _apply_filters(session.query(Finding), filters).order_by(Finding.risk_score.desc())
-    return _write_csv([{col: getattr(f, col) for col in columns} for f in findings], columns)
+    return _write_csv([_finding_columns(f, columns) for f in findings], columns)
 
 
 def report_team_summary(session: Session, filters: dict | None = None) -> str:

@@ -5,6 +5,7 @@ import json
 
 from src.common.jira_config import JiraDestination, JiraInstance
 from src.common.models import CveDetails, Finding
+from src.common.ownership import services_for
 from src.reporting.csv_reports import _format_description, _format_solution
 
 def _evidence(finding: Finding) -> str:
@@ -23,6 +24,7 @@ def issue_fields(
     destination: JiraDestination,
     instance: JiraInstance,
     cve: CveDetails | None = None,
+    *, accountable_team: str | None = None,
 ) -> dict:
     description = "\n\n".join(
         filter(
@@ -32,9 +34,10 @@ def issue_fields(
                 _format_solution(finding, cve),
                 _evidence(finding),
                 f"Finding ID: {finding.tenable_finding_id}\n"
-                f"Owner team: {finding.service_owner_team or 'Unassigned'}\n"
+                f"Accountable team: {accountable_team or finding.jira_team_id or 'Unassigned'}\n"
+                f"Source owner team: {finding.service_owner_team or 'Unassigned'}\n"
                 f"Portfolio: {finding.portfolio or 'Unknown'}\n"
-                f"Service: {finding.service or 'Unknown'}\n"
+                f"Affected services: {', '.join(services_for(finding)) or 'Unknown'}\n"
                 f"Environment: {finding.environment or 'Unknown'}\n"
                 f"Risk: {finding.risk_rating} ({finding.risk_score})\n"
                 f"SLA: {finding.sla_status}; due {finding.sla_due_date}\n"

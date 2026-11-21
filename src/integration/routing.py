@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.common.config import AppConfig
 from src.common.jira_config import JiraDestination, JiraInstance, JiraTeam, normalized
 from src.common.models import Finding
+from src.common.ownership import services_for
 
 
 @dataclass
@@ -27,6 +28,42 @@ def resolve_route(finding: Finding, config: AppConfig, *, now=None) -> Route:
         route.status = "RESUME_PENDING"
         route.reason = "policy refresh will resume from the latest observation"
     return route
+
+
+def _matches_scope(team, finding, *, service=None):
+    for key, wanted in team.match.items():
+        if key == "service_owner_team" and "service" in team.match:
+            continue
+        if key == "service":
+            actual = [service] if service is not None else services_for(finding)
+        else:
+            actual = [getattr(finding, key)]
+        if not {normalized(v) for v in actual} & {normalized(v) for v in wanted}:
+            return False
+    return True
+
+
+def _accountable_team(finding, config):
+    """Rank service teams, falling back to the first observed service's team."""
+    services = services_for(finding)
+    teams = list(config.jira.teams.values())
+    service_teams = [team for team in teams if "service" in team.match]
+    if services and service_teams:
+        by_service = [
+            [team for team in service_teams if _matches_scope(team, finding, service=name)]
+            for name in services
+        ]
+        candidates = {team.team_id: team for matches in by_service for team in matches}
+        for team_id in config.jira.remediation_team_priority:
+            if team_id in candidates:
+                return [candidates[team_id]], f"highest-ranked matching service team: {team_id}", "UNROUTED"
+        # Do not silently skip an unmapped first service to assign another one.
+        if not by_service[0]:
+            return [], f"first service {services[0]!r} has no matching team configuration or scope", "UNROUTED"
+        return by_service[0], f"first service in Tenable tag order: {services[0]}", "UNROUTED"
+    # Keep existing non-service configurations working without a priority list.
+    matches = [team for team in teams if _matches_scope(team, finding)]
+    return matches, "eligible for ticket creation" if matches else "no team rule matched ownership fields", "UNROUTED"
 
 
 def _resolve_base_route(finding: Finding, config: AppConfig) -> Route:
@@ -56,22 +93,15 @@ def _resolve_base_route(finding: Finding, config: AppConfig) -> Route:
         )
     if finding.jira_ticket_key or finding.jira_issue_id:
         return Route("BLOCKED", "existing ticket has no instance binding; adopt it explicitly")
-    matches = [
-        team
-        for team in config.jira.teams.values()
-        if all(
-            normalized(getattr(finding, key)) in {normalized(v) for v in values}
-            for key, values in team.match.items()
-        )
-    ]
+    matches, reason, missing_status = _accountable_team(finding, config)
     if len(matches) > 1:
-        return Route("BLOCKED", "multiple team rules matched")
+        return Route("BLOCKED", "multiple team rules matched; configure one accountable team")
     if not matches:
-        return Route("UNROUTED", "no team rule matched ownership fields")
+        return Route(missing_status, reason)
     team = matches[0]
     route = Route(
         "ELIGIBLE",
-        "eligible for ticket creation",
+        reason,
         team.team_id,
         team.jira,
         config.jira.instances[team.jira.instance],

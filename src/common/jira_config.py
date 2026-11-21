@@ -152,16 +152,30 @@ class JiraConfig(StrictModel):
     enabled: bool = False
     instances: dict[str, JiraInstance] = Field(default_factory=dict)
     teams: dict[str, JiraTeam] = Field(default_factory=dict)
+    remediation_team_priority: list[str] = Field(default_factory=list)
     batch_size: int = Field(default=100, ge=1, le=1000)
     refresh_seconds: int = Field(default=3600, ge=60)
     retry_base_seconds: int = Field(default=60, ge=1)
     max_attempts: int = Field(default=5, ge=1)
+
+    @field_validator("remediation_team_priority")
+    @classmethod
+    def valid_priority(cls, values):
+        values = [normalized(value) for value in values]
+        if any(not re.fullmatch(r"[a-z][a-z0-9_-]*", value) for value in values):
+            raise ValueError("remediation_team_priority must contain valid team IDs")
+        if len(set(values)) != len(values):
+            raise ValueError("remediation_team_priority contains duplicate team IDs")
+        return values
 
     @model_validator(mode="after")
     def validate_routes(self):
         if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,99}", key) for key in self.instances):
             raise ValueError("instance IDs must be lowercase slugs up to 100 characters")
         teams = list(self.teams.values())
+        unknown = set(self.remediation_team_priority) - self.teams.keys()
+        if unknown:
+            raise ValueError(f"remediation_team_priority references unknown teams: {sorted(unknown)}")
         for key, team in self.teams.items():
             if key != team.team_id:
                 raise ValueError(f"team key {key!r} does not match team_id")
@@ -169,8 +183,14 @@ class JiraConfig(StrictModel):
                 raise ValueError(f"team {key!r} references unknown instance {team.jira.instance!r}")
         for i, left in enumerate(teams):
             for right in teams[i + 1 :]:
-                # Reject overlapping rules so routing does not depend on file order.
+                # Service routing takes its own path; legacy owner/portfolio rules
+                # apply when no services or no service mappings are configured.
+                if ("service" in left.match) != ("service" in right.match):
+                    continue
                 shared = left.match.keys() & right.match.keys()
+                if "service" in left.match:
+                    # Owner tags do not constrain service-based routing.
+                    shared = shared - {"service_owner_team"}
                 disjoint = any(
                     not (
                         {normalized(v) for v in left.match[k]}
@@ -178,7 +198,10 @@ class JiraConfig(StrictModel):
                     )
                     for k in shared
                 )
-                if not disjoint:
+                ranked = "service" in left.match and any(
+                    team.team_id in self.remediation_team_priority for team in (left, right)
+                )
+                if not disjoint and not ranked:
                     raise ValueError(f"overlapping team rules: {left.team_id}, {right.team_id}")
         return self
 

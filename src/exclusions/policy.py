@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import and_, false, func, literal, not_, or_, select
 
 from src.common.jira_config import UniqueKeyLoader
+from src.common.ownership import membership_sql, services_for
 
 Fields = Literal[
     "asset_kind",
@@ -244,6 +245,8 @@ class ExclusionPolicy(Strict):
         return hashlib.sha256((self.fingerprint + json.dumps(active)).encode()).hexdigest()
 
     def values(self, finding, field):
+        if field == "service":
+            return services_for(finding)
         if field == "asset_kind":
             return [
                 "container"
@@ -277,6 +280,9 @@ class ExclusionPolicy(Strict):
         return matches
 
     def _condition_sql(self, condition, model, dialect):
+        if condition.field == "service":
+            return membership_sql(model, "services", "service",
+                                  lambda col: condition.sql(col, dialect), dialect)
         if condition.field == "asset_kind":
             from sqlalchemy import case
 

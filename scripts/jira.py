@@ -61,6 +61,7 @@ def main():
                 "enabled": config.jira.enabled,
                 "instances": sorted(config.jira.instances),
                 "teams": sorted(config.jira.teams),
+                "remediation_team_priority": config.jira.remediation_team_priority,
             }
         elif args.command == "check":
             team = config.jira.teams[args.team]

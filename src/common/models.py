@@ -55,6 +55,7 @@ class Finding(Base):
 
     portfolio = Column(String(255), nullable=True)
     service = Column(String(255), nullable=True)
+    services = Column(JSON(none_as_null=True), nullable=True)
     environment = Column(String(50), nullable=True)
     data_sensitivity = Column(String(50), nullable=True)
     asset_criticality = Column(String(20), nullable=True)

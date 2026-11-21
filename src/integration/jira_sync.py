@@ -316,6 +316,7 @@ def _sync_batch(session, config, client_factory, clock, *, target_finding_id=Non
                     route.destination,
                     route.instance,
                     session.get(CveDetails, finding.cve_id) if finding.cve_id else None,
+                    accountable_team=route.team_id,
                 )
                 if not finding.jira_ticket_key:
                     matches = client.find_correlated(

@@ -6,6 +6,11 @@ jira:
   retry_base_seconds: 60
   max_attempts: 5
 
+  # Highest priority first, using team IDs defined under config/teams/.
+  # Example after configuring those teams: [team-gscip, team-altana]
+  # No ranked match: use the first Service tag's mapped team.
+  remediation_team_priority: []
+
   instances:
     shared:
       deployment: cloud

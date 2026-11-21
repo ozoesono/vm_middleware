@@ -432,7 +432,7 @@ The integration creates one ticket per finding. Multiple teams can share a Jira
 connection, use different projects, or reference separate Jira instances. Team
 onboarding uses YAML and credentials; it needs no Python changes.
 
-Run migrations through `009` before starting the updated workers or querying the reports:
+Run migrations through `011` before starting the updated workers or querying the reports:
 
 ```bash
 make db-migrate
@@ -453,10 +453,94 @@ Credential provisioning, expiry and rotation remain the operator's responsibilit
 
 Copy `config/teams/platform.yaml` for each team and set its `team_id`, ownership
 selectors, instance ID and project. A team's `match` can use `service_owner_team`,
-`portfolio`, `service` and `environment`. Values within a selector use OR; selectors
-use AND. Matching ignores case and surrounding whitespace. The loader rejects
-overlapping rules, unknown keys, duplicate team IDs and missing instance references.
+`portfolio`, `service` and `environment`. Values within a selector use OR; other
+scope selectors use AND. Service-based routing uses the team priority list below;
+Owner tags are not required or used to select its accountable team. Matching ignores
+case and surrounding whitespace. The loader rejects unresolved overlapping rules, unknown keys,
+duplicate team IDs and missing instance references.
 Unmatched findings remain unticketed and appear as `UNROUTED` after delivery examines them.
+
+#### Shared services and ranked remediation teams
+
+Assets may have several `Service-...` tags. The middleware stores every distinct
+service in `findings.services`, preserving first-seen Tenable tag order and spelling
+while removing case-insensitive duplicates. The legacy
+`service` column contains the value for a single service and is empty for shared
+assets. Multiple service tags are valid and no longer produce collision warnings.
+
+For an asset with only `Service-GSCIP`, configure its team's selector as:
+
+```yaml
+team_id: team-gscip
+enabled: true
+match:
+  service: [GSCIP]
+# Retain this team's actual jira and ticketing configuration below.
+```
+
+For multiple services, set the preferred teams in `config/jira.yaml`, highest
+priority first. The entries are configured `team_id` values, not raw service tags.
+For example, once both teams have their Jira destinations configured:
+
+```yaml
+jira:
+  remediation_team_priority:
+    - team-gscip
+    - team-altana
+```
+
+The middleware finds the team mappings for all services on the finding, applies
+their portfolio/environment scope, then picks the first matching team in this
+priority list. If no matching team is ranked, it selects the team mapped to the
+first service in Tenable tag order. An empty priority list uses this fallback for
+every finding. A single service uses its mapped team without an Owner tag.
+
+For example, `[Altana, GSCIP]` selects GSCIP with the ranking above, but selects
+Altana when neither team is ranked. Tag order is preserved through enrichment and
+storage; configuration file order and alphabetical order do not decide the fallback.
+If Tenable changes tag order before a ticket is bound, the fallback may change too.
+
+An unranked service still needs a configured team and Jira destination. If the
+first service has no matching mapping or scope and no other matching team is ranked,
+the finding is `UNROUTED`; it is not silently assigned to a later unranked service.
+Unknown or duplicate priority-list entries fail validation. Overlapping mappings
+for the same service require a ranking that resolves the overlap.
+
+Owner tags and CSV `service_owner_team` values remain source metadata and do not
+override service ranking. A `service_owner_team` selector on a service-based team
+rule is ignored; remove it to make the rule's purpose clear. A CSV `service`
+override explicitly replaces the service list with one value. Existing non-service
+routing rules remain available when the finding has no services or no service
+mappings are configured at all.
+
+The chosen team must still pass the enabled-team, risk, rollout and creation-budget
+checks. Failure of those checks does not hand remediation to a lower-ranked team.
+Exclusions still pause delivery. Each finding receives one ticket containing all
+affected services.
+
+Preview includes `services`, the resolved `accountable_team`, and a reason showing
+whether ranking or first-service fallback selected it.
+After delivery evaluates a routed finding, `jira_team_id` records its accountable
+destination. Existing linked tickets retain their binding when tags or rankings
+change; the middleware updates the ticket content but does not move projects or
+create a second ticket.
+
+Reports contain the service list, and `--service` can select a finding through any
+of its services. Selecting several services counts a shared finding only once in
+the same report. Service-scoped exclusions match any member and pause the whole
+finding, including its single Jira ticket. `--owner-team` and owner exclusions use
+explicit source ownership, not a team inferred from a service selector.
+
+Migration `011` adds the `services` JSON column and copies known
+legacy scalar service values into lists. It cannot recover tags previously discarded by
+the old parser. The next tagged ingestion applies the full asset tag list to the
+findings it observes. An authoritative asset tag list can clear removed Service
+tags; partial finding-only responses preserve existing services when the category
+is absent. Resumed runs still use their saved tag snapshot.
+
+Apply the migration before deploying this code to running jobs. The pipeline now
+checks for missing finding columns before fetching Tenable data and stops with a
+migration instruction if the schema is behind.
 
 Each team can set priority names, labels, component names, initial assignment,
 literal `custom_fields` values keyed by Jira field ID, and close/reopen transitions.

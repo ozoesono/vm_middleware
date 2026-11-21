@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from src.common.config import AppConfig
 from src.common.logging import get_logger
 from src.common.models import Finding, FindingStaging, JiraActionQueue, PipelineRun
+from src.common.ownership import services_for, unique_names
 from src.exclusions.service import apply_policy
 from src.ingestion.enrichment import CRITICALITY_SCORES
 from src.scoring.engine import score_record
@@ -164,7 +165,9 @@ def _apply_enrichment_to_finding(finding: Finding, enrichment: dict) -> None:
     if not enrichment:
         return
     finding.portfolio = enrichment.get("portfolio") or finding.portfolio
-    finding.service = enrichment.get("service") or finding.service
+    if "services" in enrichment or enrichment.get("service"):
+        finding.services = unique_names(enrichment.get("services", enrichment.get("service")))
+        finding.service = finding.services[0] if len(finding.services) == 1 else None
     finding.environment = enrichment.get("environment") or finding.environment
     finding.data_sensitivity = enrichment.get("data_sensitivity") or finding.data_sensitivity
     finding.asset_criticality = enrichment.get("asset_criticality") or finding.asset_criticality
@@ -228,8 +231,10 @@ def _process_existing_with_staged(
     old_risk_rating = finding.risk_rating
     detail_fields = ("source_description", "detection_output", "solution")
     old_details = tuple(getattr(finding, name) for name in detail_fields)
+    old_ownership = (services_for(finding), finding.service_owner_team)
     _observe_finding(finding, staged, config, run_id, session)
     details_changed = old_details != tuple(getattr(finding, name) for name in detail_fields)
+    ownership_changed = old_ownership != (services_for(finding), finding.service_owner_team)
     tenable_state = (staged.tenable_state or "ACTIVE").upper()
 
     if tenable_state == "FIXED":
@@ -271,17 +276,21 @@ def _process_existing_with_staged(
             stats.findings_updated += 1
             return
 
+        if ownership_changed and finding.jira_sync_status not in ("FAILED", "RETRY", "UNCERTAIN"):
+            finding.jira_next_sync_at = None
+
         new_sla_status = determine_sla_status(finding.sla_due_date, config.sla)
         finding.sla_status = new_sla_status
 
         if finding.jira_ticket_key and (
             old_sla_status != new_sla_status or old_risk_rating != finding.risk_rating
-            or details_changed
+            or details_changed or ownership_changed
         ):
             queued = _queue_jira_action(session, run_id, finding.id, "UPDATE", {
                 "sla_status_change": f"{old_sla_status} -> {new_sla_status}",
                 "risk_score": finding.risk_score,
                 "details_changed": details_changed,
+                "ownership_changed": ownership_changed,
             })
             stats.jira_actions_created += int(queued)
 

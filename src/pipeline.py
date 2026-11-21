@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from sqlalchemy import desc
 
 from src.common.config import AppConfig
-from src.common.db import get_session
+from src.common.db import check_finding_schema, get_session
 from src.common.logging import get_logger, setup_logging
 from src.common.models import FindingStaging, JiraActionQueue, PipelineRun
 from src.exclusions.service import filter_untracked_findings
@@ -184,6 +184,7 @@ def run_pipeline(
     setup_logging(config.settings.log_level)
 
     with get_session() as session:
+        check_finding_schema(session)
         run_id, start_offset, is_resume = _setup_or_resume_run(
             session, config, start_fresh, trigger
         )

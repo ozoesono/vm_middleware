@@ -2,9 +2,10 @@
 
 from collections import Counter
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 
 from src.common.models import CveDetails, Finding, JiraCreationBudget, PipelineRun
+from src.common.ownership import membership_sql, services_for
 from src.integration.payloads import issue_fields
 from src.integration.routing import resolve_route, validate_rollout
 
@@ -36,11 +37,17 @@ def preview_routes(session, config, *, team_id=None, limit=100, finding_id=None,
         query = query.filter(Finding.source == source)
     if team_id:
         team = config.jira.teams[team_id]
-        selectors = [
-            func.lower(func.trim(getattr(Finding, key))).in_([v.strip().lower() for v in values])
-            for key, values in team.match.items()
-        ]
-        from sqlalchemy import and_, or_
+        selectors = []
+        dialect = session.get_bind().dialect.name
+        for key, values in team.match.items():
+            if key == "service_owner_team" and "service" in team.match:
+                continue
+            wanted = [v.strip().lower() for v in values]
+            if key == "service":
+                selectors.append(membership_sql(Finding, "services", "service",
+                    lambda col: func.lower(func.trim(col)).in_(wanted), dialect))
+            else:
+                selectors.append(func.lower(func.trim(getattr(Finding, key))).in_(wanted))
 
         query = query.filter(or_(Finding.jira_team_id == team_id, and_(*selectors)))
     rows = []
@@ -70,6 +77,7 @@ def preview_routes(session, config, *, team_id=None, limit=100, finding_id=None,
                 route.destination,
                 route.instance,
                 session.get(CveDetails, finding.cve_id) if finding.cve_id else None,
+                accountable_team=route.team_id,
             )
         rows.append(
             {
@@ -78,6 +86,8 @@ def preview_routes(session, config, *, team_id=None, limit=100, finding_id=None,
                 "title": finding.title,
                 "source": finding.source,
                 "risk_rating": finding.risk_rating,
+                "services": services_for(finding),
+                "accountable_team": route.team_id,
                 "team_id": route.team_id,
                 "route_status": route.status,
                 "instance": route.destination.instance if route.destination else None,

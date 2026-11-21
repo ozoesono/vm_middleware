@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.common.config import AppSettings
@@ -20,6 +20,22 @@ class Base(DeclarativeBase):
 
 _engine = None
 _SessionLocal = None
+
+
+def check_finding_schema(session: Session) -> None:
+    """Fail before fetching Tenable data if required finding columns are missing."""
+    from src.common.models import Finding, FindingStaging
+
+    inspector = inspect(session.connection())
+    missing = []
+    for model in (Finding, FindingStaging):
+        table = model.__tablename__
+        actual = {column["name"] for column in inspector.get_columns(table)} if inspector.has_table(table) else set()
+        missing.extend(f"{table}.{column.name}" for column in model.__table__.columns
+                       if column.name not in actual)
+    if missing:
+        raise RuntimeError("Database migration required before ingestion. Run alembic upgrade head. "
+                           "Missing columns: " + ", ".join(missing))
 
 
 def init_db(database_url: str | SecretStr | None = None) -> None:

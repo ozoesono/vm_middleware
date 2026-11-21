@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from src.common.logging import get_logger
 from src.common.models import EnrichmentMapping, FindingStaging
+from src.common.ownership import unique_names
 from src.common.tag_parser import CATEGORY_TO_FIELD, parse_tags
 
 logger = get_logger("enrichment")
@@ -28,6 +29,13 @@ CRITICALITY_SCORES = {
     "MEDIUM": 0.50,
     "LOW": 0.25,
 }
+
+
+def _service_enrichment(parsed, *, authoritative=False):
+    if "Service" not in parsed and not authoritative:
+        return {}
+    names = unique_names(parsed.get("Service"))
+    return {"services": names, "service": names[0] if len(names) == 1 else None}
 
 
 def load_enrichment_from_csv(csv_path: str, session: Session) -> int:
@@ -149,7 +157,6 @@ def apply_asset_tags_enrichment(
 
         enrichment_payload = {
             "portfolio": parsed_dict.get("Portfolio"),
-            "service": parsed_dict.get("Service"),
             "environment": parsed_dict.get("Environment"),
             "data_sensitivity": parsed_dict.get("Sensitivity"),
             "asset_criticality": criticality_label,
@@ -161,6 +168,7 @@ def apply_asset_tags_enrichment(
         tags = dict(sf.tenable_tags or {})
         existing = dict(tags.get("_enrichment", {}))
         existing.update({k: v for k, v in enrichment_payload.items() if v is not None})
+        existing.update(_service_enrichment(parsed_dict, authoritative=True))
         tags["_enrichment"] = existing
         sf.tenable_tags = tags
         enriched += 1
@@ -223,6 +231,8 @@ def apply_enrichment(session: Session, run_id: uuid.UUID) -> int:
                 "service_owner": mapping.service_owner or tag_enrichment.get("service_owner"),
                 "service_owner_team": mapping.service_owner_team or tag_enrichment.get("service_owner_team"),
             })
+            if mapping.service:
+                tag_enrichment.update(services=unique_names(mapping.service), service=mapping.service)
 
         if tag_enrichment:
             tags["_enrichment"] = tag_enrichment
@@ -258,9 +268,13 @@ def _extract_tag_enrichment(sf: FindingStaging) -> dict:
 
     enrichment: dict = {}
     for category, value in parsed_dict.items():
+        if category == "Service":
+            continue
         field = CATEGORY_TO_FIELD.get(category)
         if field:
             enrichment[field] = value
+
+    enrichment.update(_service_enrichment(parsed_dict))
 
     if enrichment.get("asset_criticality"):
         enrichment["asset_criticality_score"] = CRITICALITY_SCORES.get(
