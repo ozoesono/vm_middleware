@@ -1,0 +1,417 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Daily ECR image cleanup at 09:00 UTC with ECS task history and a preview mode.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Description: Private ECR repository name, including any path. Use a repository dedicated to the ECS services listed below.
+    AllowedPattern: '[a-z0-9]+(([.]|__?|-+|/)[a-z0-9]+)*'
+  ClusterName:
+    Type: String
+    Description: ECS cluster name in this account and Region.
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  ServiceNames:
+    Type: CommaDelimitedList
+    Description: Names of all ECS services using this repository in the cluster, separated by commas.
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  Mode:
+    Type: String
+    AllowedValues: [Preview, Delete]
+    Default: Preview
+    Description: Preview logs the eligible digests. Delete lets the daily schedule remove them.
+  InitialProtectedDigests:
+    Type: String
+    Default: ''
+    AllowedPattern: '^\s*(sha256:[a-f0-9]{64}(\s*,\s*sha256:[a-f0-9]{64})*)?\s*$'
+    Description: Optional. Enter all repository digests used by the last three distinct task revisions that ran for each listed service. Leave blank to wait for runtime history to accumulate.
+
+Conditions:
+  EnableDeletion: !Equals [!Ref Mode, Delete]
+
+Resources:
+  History:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: workload, AttributeType: S}
+        - {AttributeName: observation, AttributeType: S}
+      KeySchema:
+        - {AttributeName: workload, KeyType: HASH}
+        - {AttributeName: observation, KeyType: RANGE}
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - {Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: 'sts:AssumeRole'}
+      Policies:
+        - PolicyName: Retention
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
+                Resource: !GetAtt Logs.Arn
+              - Effect: Allow
+                Action: ['dynamodb:DescribeTable', 'dynamodb:Query', 'dynamodb:PutItem']
+                Resource: !GetAtt History.Arn
+              - Effect: Allow
+                Action: ['ecs:ListTasks', 'ecs:DescribeTasks', 'ecs:DescribeServices', 'ecs:DescribeTaskDefinition', 'ecs:DescribeServiceRevisions']
+                Resource: '*'
+              - Effect: Allow
+                Action: ['ecr:DescribeImages', 'ecr:BatchGetImage']
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${RepositoryName}'
+              - !If
+                - EnableDeletion
+                - Effect: Allow
+                  Action: 'ecr:BatchDeleteImage'
+                  Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${RepositoryName}'
+                - !Ref AWS::NoValue
+  Worker:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 900
+      MemorySize: 512
+      Role: !GetAtt FunctionRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref Logs
+      Environment:
+        Variables:
+          TABLE: !Ref History
+          REPOSITORY: !Ref RepositoryName
+          REGISTRY: !Ref AWS::AccountId
+          DNS_SUFFIX: !Ref AWS::URLSuffix
+          CLUSTER: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}'
+          SERVICES: !Join [',', !Ref ServiceNames]
+          MODE: !Ref Mode
+          INITIAL_DIGESTS: !Ref InitialProtectedDigests
+      Code:
+        ZipFile: |
+          import hashlib
+          import json
+          import os
+          import re
+          from collections import defaultdict
+          from datetime import datetime, timedelta, timezone
+
+          import boto3
+          from boto3.dynamodb.conditions import Key
+          from botocore.exceptions import ClientError
+
+          env = os.environ
+          ecs = boto3.client("ecs")
+          ecr = boto3.client("ecr")
+          table = boto3.resource("dynamodb").Table(env["TABLE"])
+          repo, cluster = env["REPOSITORY"], env["CLUSTER"]
+          services = set(env["SERVICES"].split(","))
+          seeds = {x.strip() for x in env["INITIAL_DIGESTS"].split(",") if x.strip()}
+          hosts = set()
+          for endpoint in ("ecr", "ecr-fips"):
+              base = f"{env['REGISTRY']}.dkr"
+              hosts.add(f"{base}.{endpoint}.{env['AWS_REGION']}.{env['DNS_SUFFIX']}")
+              hosts.add(f"{base}-{endpoint}.{env['AWS_REGION']}.on.aws")
+          sha = re.compile(r"sha256:[0-9a-f]{64}").fullmatch
+          indexes = {"application/vnd.docker.distribution.manifest.list.v2+json",
+                     "application/vnd.oci.image.index.v1+json"}
+
+          def pages(client, method, field, **args):
+              for page in client.get_paginator(method).paginate(**args):
+                  yield from page[field]
+
+          def batches(items, limit=100):
+              items = list(items)
+              for i in range(0, len(items), limit):
+                  yield items[i:i + limit]
+
+          def checked(response, field, expected):
+              if response.get("failures") or len(response[field]) != expected:
+                  raise RuntimeError(f"Incomplete {field} response: {response.get('failures')}")
+              return response[field]
+
+          def image_ref(uri):
+              host, _, path = uri.partition("/")
+              path, at, pin = path.partition("@")
+              name, _, tag = path.partition(":")
+              if host in hosts and name == repo:
+                  return pin if at else (tag or "latest")
+              return None
+
+          def runtime_digests(containers):
+              if not containers:
+                  return {"UNKNOWN"}
+              result = set()
+              for c in containers:
+                  if not c.get("image"):
+                      result.add("UNKNOWN")
+                      continue
+                  ref = image_ref(c["image"])
+                  if ref is None:
+                      continue
+                  if sha(ref):
+                      result.add(ref)
+                  digest = c.get("imageDigest") or (ref if sha(ref) else "UNKNOWN")
+                  result.add(digest if sha(digest) else "UNKNOWN")
+              return result
+
+          def millis(value):
+              if isinstance(value, str):
+                  value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+              return int(value.timestamp() * 1000)
+
+          def workload(service):
+              return f"{cluster}|{service}|{repo}"
+
+          def record(task, service):
+              revision = task["taskDefinitionArn"]
+              digests = sorted(runtime_digests(task.get("containers")))
+              observed = millis(task["startedAt"])
+              signature = hashlib.sha256(json.dumps(digests).encode()).hexdigest()
+              row = {"workload": workload(service), "observation": f"{revision}|{signature}",
+                     "revision": revision, "digests": digests, "started": observed}
+              try:
+                  table.put_item(Item=row, ConditionExpression="attribute_not_exists(#s) OR #s < :t",
+                                 ExpressionAttributeNames={"#s": "started"},
+                                 ExpressionAttributeValues={":t": observed})
+              except ClientError as error:
+                  if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                      raise
+              return set(digests)
+
+          def historical(service):
+              args = {"KeyConditionExpression": Key("workload").eq(workload(service)), "ConsistentRead": True}
+              times, digests = {}, defaultdict(set)
+              while True:
+                  page = table.query(**args)
+                  for row in page["Items"]:
+                      rev = row["revision"]
+                      times[rev] = max(times.get(rev, 0), row["started"])
+                      digests[rev].update(row["digests"])
+                  if "LastEvaluatedKey" not in page:
+                      break
+                  args["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+              ranked = sorted(times.values(), reverse=True)
+              threshold = ranked[2] if len(ranked) >= 3 else 0
+              recent = [r for r in times if times[r] >= threshold]
+              protected = set().union(*(digests[r] for r in recent))
+              ready = len(ranked) >= 3 and threshold >= millis(table.creation_date_time)
+              if not ready:
+                  protected.update(seeds)
+              print(json.dumps({"service": service, "recentRevisions": recent, "usingInitialHistory": not ready}))
+              return protected, ready or bool(seeds)
+
+          def inventory():
+              return {im["imageDigest"]: im for im in pages(ecr, "describe_images", "imageDetails",
+                                                           repositoryName=repo)}
+
+          def service_state(service, tags):
+              response = ecs.describe_services(cluster=cluster, services=[service])
+              state = checked(response, "services", 1)[0]
+              deployments = state.get("deployments", [])
+              stable = (state["status"] == "ACTIVE" and len(deployments) == 1
+                        and deployments[0]["status"] == "PRIMARY"
+                        and deployments[0].get("rolloutState", "COMPLETED") == "COMPLETED"
+                        and state["pendingCount"] == 0 and state["runningCount"] == state["desiredCount"])
+              protected = set()
+              # Protect currently configured image references, including a service scaled to zero.
+              definition = ecs.describe_task_definition(taskDefinition=state["taskDefinition"])["taskDefinition"]
+              for container in definition["containerDefinitions"]:
+                  ref = image_ref(container["image"])
+                  if ref is not None:
+                      protected.add(ref if sha(ref) else tags.get(ref, "UNKNOWN"))
+              for batch in batches([r["arn"] for r in state.get("currentServiceRevisions", [])], 10):
+                  revisions = checked(ecs.describe_service_revisions(serviceRevisionArns=batch),
+                                      "serviceRevisions", len(batch))
+                  for revision in revisions:
+                      if revision.get("containerImages"):
+                          protected.update(runtime_digests(revision["containerImages"]))
+              live_count = 0
+              for desired in ("RUNNING", "STOPPED"):
+                  tasks = pages(ecs, "list_tasks", "taskArns", cluster=cluster, serviceName=service,
+                                desiredStatus=desired)
+                  for batch in batches(tasks):
+                      for task in checked(ecs.describe_tasks(cluster=cluster, tasks=batch), "tasks", len(batch)):
+                          if task.get("startedAt"):
+                              observed = record(task, service)
+                              if task["lastStatus"] != "STOPPED":
+                                  protected.update(observed)
+                          if task["lastStatus"] != desired:
+                              stable = False
+                          if desired == "RUNNING" and task["lastStatus"] == "RUNNING":
+                              live_count += 1
+                              if not task.get("startedAt"):
+                                  stable = False
+              past, ready = historical(service)
+              protected.update(past)
+              reasons = []
+              if not stable or live_count != state["runningCount"]:
+                  reasons.append(f"{service}: deployment or task transition in progress")
+              if not ready:
+                  reasons.append(f"{service}: waiting for three observed revisions or verified initial digests")
+              if "UNKNOWN" in protected:
+                  reasons.append(f"{service}: an image digest could not be resolved")
+              return protected, reasons
+
+          def manifest_links(images):
+              children, parents = defaultdict(set), defaultdict(set)
+              manifests = [d for d, im in images.items() if im.get("imageManifestMediaType") in indexes]
+              for batch in batches(manifests):
+                  response = ecr.batch_get_image(repositoryName=repo, imageIds=[{"imageDigest": d} for d in batch])
+                  for entry in checked(response, "images", len(batch)):
+                      parent = entry["imageId"]["imageDigest"]
+                      for item in json.loads(entry["imageManifest"])["manifests"]:
+                          child = item["digest"]
+                          children[parent].add(child)
+                          parents[child].add(parent)
+              return children, parents
+
+          def expand(digests, links):
+              seen, todo = set(digests), list(digests)
+              while todo:
+                  for related in links.get(todo.pop(), ()):
+                      if related not in seen:
+                          todo.append(related)
+                          seen.add(related)
+              return seen
+
+          def plan():
+              images = inventory()
+              tags = {tag: d for d, im in images.items() for tag in im.get("imageTags", [])}
+              protected, holds = set(), []
+              for service in sorted(services):
+                  digests, reasons = service_state(service, tags)
+                  protected.update(digests)
+                  holds.extend(reasons)
+              missing = protected.difference(images)
+              if missing:
+                  holds.append(f"Protected digests absent from the inventory: {sorted(missing)}")
+              if not protected:
+                  holds.append("No protected image found. Check the repository and service names.")
+              if holds:
+                  print(json.dumps({"outcome": "HOLD", "reasons": holds}))
+                  return images, {}, set(), holds
+              children, parents = manifest_links(images)
+              protected = expand(protected, parents)
+              cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+              for digest, im in images.items():
+                  if (im["imagePushedAt"] >= cutoff or im.get("imageStatus", "ACTIVE") != "ACTIVE"
+                          or im.get("subjectManifestDigest")):
+                      protected.add(digest)
+              protected = expand(protected, children)
+              return images, parents, images.keys() - protected, []
+
+          def cleanup(delete):
+              images, parents, candidates, holds = plan()
+              if holds:
+                  return {"outcome": "HOLD", "reasons": holds}
+              for digest in sorted(candidates):
+                  im = images[digest]
+                  print(json.dumps({"action": "candidate", "digest": digest, "tags": im.get("imageTags", []),
+                                    "pushedAt": im["imagePushedAt"].isoformat()}))
+              if not delete:
+                  return {"outcome": "PREVIEW", "eligible": len(candidates)}
+              deleted = 0
+              remaining = set(candidates)
+              while remaining:
+                  # ECR requires a manifest list to be removed before its children.
+                  roots = sorted(d for d in remaining if not parents.get(d, set()).intersection(remaining))
+                  if not roots:
+                      raise RuntimeError("Cannot order ECR manifests for deletion")
+                  for batch in batches(roots):
+                      _, _, eligible, holds = plan()
+                      if holds or not set(batch).issubset(eligible):
+                          return {"outcome": "HOLD", "deleted": deleted, "reasons": holds or ["Eligibility changed"]}
+                      response = ecr.batch_delete_image(repositoryName=repo, imageIds=[{"imageDigest": d} for d in batch])
+                      print(json.dumps({"removed": response["imageIds"], "failures": response["failures"]}))
+                      if response["failures"]:
+                          raise RuntimeError("ECR reported a partial deletion. See the log for per-image results.")
+                      deleted += len(response["imageIds"])
+                      remaining.difference_update(batch)
+              return {"outcome": "DELETED", "deleted": deleted}
+
+          def handler(event, context):
+              if event.get("source") == "aws.ecs":
+                  task = event["detail"]
+                  service = task.get("group", "").removeprefix("service:")
+                  if (task["clusterArn"] == cluster and task.get("group") == f"service:{service}"
+                          and service in services):
+                      if task.get("lastStatus") == "RUNNING" and not task.get("startedAt"):
+                          task = checked(ecs.describe_tasks(cluster=cluster, tasks=[task["taskArn"]]),
+                                         "tasks", 1)[0]
+                          if not task.get("startedAt"):
+                              raise RuntimeError("ECS has not reported the task start time")
+                      if task.get("startedAt"):
+                          record(task, service)
+                  return
+              delete = env["MODE"] == "Delete" and event.get("run") == "scheduled" and bool(event.get("scheduledAt"))
+              if delete:
+                  scheduled = datetime.fromisoformat(event["scheduledAt"].replace("Z", "+00:00"))
+                  now = datetime.now(timezone.utc)
+                  if now.replace(second=0, microsecond=0) != scheduled.replace(second=0, microsecond=0):
+                      print("Skipping late scheduled delivery")
+                      return {"outcome": "SKIPPED_LATE"}
+              result = cleanup(delete)
+              print(json.dumps(result))
+              return result
+  Capture:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source: [aws.ecs]
+        detail-type: [ECS Task State Change]
+        detail:
+          clusterArn: [!Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}']
+          group:
+            - prefix: 'service:'
+          lastStatus: [RUNNING, STOPPED]
+      Targets:
+        - {Id: RecordTask, Arn: !GetAtt Worker.Arn}
+  CapturePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Worker
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt Capture.Arn
+  ScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals: {'aws:SourceAccount': !Ref 'AWS::AccountId'}
+      Policies:
+        - PolicyName: InvokeCleanup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - {Effect: Allow, Action: 'lambda:InvokeFunction', Resource: !GetAtt Worker.Arn}
+  DailyCleanup:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      ScheduleExpression: 'cron(0 9 * * ? *)'
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow: {Mode: 'OFF'}
+      Target:
+        Arn: !GetAtt Worker.Arn
+        RoleArn: !GetAtt ScheduleRole.Arn
+        Input: '{"run":"scheduled","scheduledAt":"<aws.scheduler.scheduled-time>"}'
+        RetryPolicy: {MaximumRetryAttempts: 0}
+Outputs:
+  PreviewFunction:
+    Description: Open this Lambda function and test it with an empty JSON object to preview immediately.
+    Value: !Ref Worker
+  LogGroup:
+    Description: CloudWatch Logs group containing protected revisions, candidates and scheduled cleanup results.
+    Value: !Ref Logs
